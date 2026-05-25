@@ -26,6 +26,12 @@ async function main() {
   // Test CDP connection
   try {
     await cdp.connect();
+    // ⚡ 최초 1회: 봇 재기동 시 브라우저의 구형 캐시 플래그를 강제 정화하여 신형 matchedText 감지기가 무조건 새로 주입되도록 보장합니다.
+    await cdp.evaluate(`(() => {
+      window.antigravityObserverActive = false;
+      if (window.antigravityCheckTimeout) clearTimeout(window.antigravityCheckTimeout);
+    })()`).catch(() => {});
+    
     const title = await cdp.evaluate('document.title');
     console.log(`✅ CDP connected: "${title}"`);
   } catch (err) {
