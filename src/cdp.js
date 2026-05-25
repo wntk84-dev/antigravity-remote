@@ -667,22 +667,25 @@ class CdpClient extends EventEmitter {
   async createNewSession() {
     await this.connect();
     return this.evaluate(`(() => {
-      // 1. Common New Chat/New Session selector
-      const btn = document.querySelector('button[aria-label="New chat"], button[aria-label*="New Chat"], button[class*="new-chat"], button[aria-label*="New conversation"], [class*="new-session"]');
+      // 1. Common New Chat/New Session selector (case-insensitive i flag matching)
+      const btn = document.querySelector('button[aria-label="New Conversation"], button[aria-label="New conversation"], button[aria-label*="New conversation" i], button[aria-label*="new chat" i], [class*="new-session"]');
       if (btn) {
         btn.click();
         return { ok: true };
       }
-      // 2. Fallback text search
-      const allButtons = Array.from(document.querySelectorAll('button'));
-      const newChatBtn = allButtons.find(b => {
-        const text = (b.textContent || '').trim().toLowerCase();
-        return text === 'new chat' || text === 'new conversation' || text.includes('new chat');
+      
+      // 2. Custom role="button" or general elements search for "New Conversation" or "New Chat"
+      const allElements = Array.from(document.querySelectorAll('button, [role="button"], a, div'));
+      const newSessionEl = allElements.find(el => {
+        const text = (el.textContent || '').trim().toLowerCase();
+        return text === 'new conversation' || text === 'new chat' || text.includes('new conversation');
       });
-      if (newChatBtn) {
-        newChatBtn.click();
+      
+      if (newSessionEl) {
+        newSessionEl.click();
         return { ok: true };
       }
+      
       return { ok: false, error: 'New Session button not found' };
     })()`);
   }
