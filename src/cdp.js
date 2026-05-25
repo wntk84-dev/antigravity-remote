@@ -280,7 +280,12 @@ class CdpClient extends EventEmitter {
 
     // 3. Inject MutationObserver script to the page
     const script = `(() => {
-      if (window.antigravityObserverActive) return;
+      if (window.antigravityObserver) {
+        try {
+          window.antigravityObserver.disconnect();
+          console.log("🧹 Previous zombie MutationObserver disconnected successfully!");
+        } catch (e) {}
+      }
       window.antigravityObserverActive = true;
       console.log("🚀 Antigravity MutationObserver Active!");
 
@@ -622,14 +627,14 @@ class CdpClient extends EventEmitter {
 
       checkApprovalState();
 
-      const observer = new MutationObserver(() => {
+      window.antigravityObserver = new MutationObserver(() => {
         if (window.antigravityCheckTimeout) clearTimeout(window.antigravityCheckTimeout);
         window.antigravityCheckTimeout = setTimeout(() => {
           checkApprovalState();
         }, 50);
       });
 
-      observer.observe(document.body, {
+      window.antigravityObserver.observe(document.body, {
         childList: true,
         subtree: true,
         attributes: true,
