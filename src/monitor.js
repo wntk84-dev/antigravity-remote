@@ -107,13 +107,13 @@ class ResponseMonitor extends EventEmitter {
 
       // Robust DOM-level assistant response extraction (completely immune to terminal logs, tool outputs, and UI chrome)
       const cleanResponse = await cdp.evaluate(`(() => {
-        // 1. Find the absolute last user chat bubble (which is always the one we just injected)
-        const userMsgs = Array.from(document.querySelectorAll('div.whitespace-pre-wrap.text-sm'));
+        // 1. Find the last actual User message chat bubble
+        const userMsgs = Array.from(document.querySelectorAll('[aria-label="User message"]'));
         const targetUserMsg = userMsgs[userMsgs.length - 1];
         if (!targetUserMsg) return '';
 
         // 2. Find all assistant message elements that appear AFTER the user message
-        const assistantMsgs = Array.from(document.querySelectorAll('div.leading-relaxed.select-text'));
+        const assistantMsgs = Array.from(document.querySelectorAll('[aria-label="Agent response"] div.px-2.py-1 > div.leading-relaxed.select-text'));
         const subsequentMsgs = assistantMsgs.filter(el => {
           return (targetUserMsg.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
         });

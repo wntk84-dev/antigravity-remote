@@ -31,20 +31,37 @@ class CdpClient extends EventEmitter {
   }
 
   /** Connect to Antigravity via CDP */
-  async connect() {
-    if (this.connected && this.ws?.readyState === WebSocket.OPEN) return;
+  async connect(specificUrl = null) {
+    if (specificUrl) {
+      this.targetUrl = specificUrl;
+    }
 
-    const list = await this._getJson(`http://${config.cdpHost}:${config.cdpPort}/json/list`);
-    const page = list.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+    if (this.connected && this.ws?.readyState === WebSocket.OPEN && (!specificUrl || this.targetUrl === specificUrl)) return;
 
-    if (!page) throw new Error('No Antigravity page found on CDP');
+    if (!specificUrl && !this.targetUrl) {
+      const list = await this._getJson(`http://${config.cdpHost}:${config.cdpPort}/json/list`);
+      const page = list.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+      if (!page) throw new Error('No Antigravity page found on CDP');
+      this.targetUrl = page.webSocketDebuggerUrl;
+    } else if (specificUrl) {
+      this.targetUrl = specificUrl;
+    }
 
-    this.targetUrl = page.webSocketDebuggerUrl;
-    console.log(`🔌 Connecting to: ${page.title || '(untitled)'}`);
+    console.log(`🔌 Connecting to: ${this.targetUrl}`);
 
     await this._connectWs();
     await this.call('Runtime.enable');
     console.log('✅ CDP connected');
+  }
+
+  /** Fetch all available page targets from CDP */
+  async getPagesList() {
+    try {
+      const list = await this._getJson(`http://${config.cdpHost}:${config.cdpPort}/json/list`);
+      return list.filter((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+    } catch (err) {
+      return [];
+    }
   }
 
   /** Establish WebSocket connection */
@@ -414,7 +431,27 @@ class CdpClient extends EventEmitter {
             if (hasActiveButtons) {
               isPermissionOpen = true;
               matchedText = text.substring(0, 60);
-              foundButtons = ["Yes, allow this time", "No", "Submit", "Skip"];
+              
+              const dynamicButtons = [];
+              for (const subEl of containerElements) {
+                const tag = (subEl.tagName || '').toLowerCase();
+                const role = subEl.getAttribute('role') || '';
+                const btnText = (subEl.textContent || '').trim();
+                
+                const isBtn = tag === 'button' || role === 'button' || (tag === 'input' && (subEl.type === 'button' || subEl.type === 'submit'));
+                
+                if (isBtn && btnText && btnText.length > 0 && btnText.length < 30) {
+                  if (!dynamicButtons.includes(btnText)) {
+                    dynamicButtons.push(btnText);
+                  }
+                }
+              }
+
+              if (dynamicButtons.length > 0) {
+                foundButtons = dynamicButtons;
+              } else {
+                foundButtons = ["Yes, allow this time", "No", "Submit", "Skip", "이번만 허용", "거절", "확인", "실행", "취소"];
+              }
               break;
             }
           }
@@ -693,7 +730,8 @@ class CdpClient extends EventEmitter {
   /** Scan and return currently available AI models in the UI */
   async getAvailableModels() {
     await this.connect();
-    return this.evaluate(`(() => {
+    return this.evaluate(`(async () => {
+      // 1. Standard HTML select dropdown fallback
       const select = document.querySelector('select[class*="model"], select[id*="model"]');
       if (select) {
         return {
@@ -702,18 +740,70 @@ class CdpClient extends EventEmitter {
           options: Array.from(select.options).map(o => o.text || o.value)
         };
       }
-      const btn = document.querySelector('button[aria-label*="model"], button[class*="model-selector"], [class*="model-select"]');
+      
+      // 2. Custom React popover button selector
+      const btn = document.querySelector('button[aria-label*="Select model"], button[aria-label*="model"], button[class*="model-selector"], [class*="model-select"]');
       if (btn) {
+        // Parse current model name from text content or aria-label
+        let current = (btn.textContent || '').trim();
+        const ariaLabel = btn.getAttribute('aria-label') || '';
+        const match = ariaLabel.match(/current:\s*(.+)/i);
+        if (match && match[1]) {
+          current = match[1].trim();
+        }
+        
+        // Check if popover is already open
+        let popoverItems = Array.from(document.querySelectorAll('button, a, div[role="menuitem"]')).filter(el => {
+          const cls = typeof el.className === 'string' ? el.className : '';
+          return cls.includes('popover-item') || el.getAttribute('data-autofocus') !== null;
+        });
+        
+        let openedByUs = false;
+        if (popoverItems.length === 0) {
+          // Open popover by clicking
+          btn.click();
+          openedByUs = true;
+          // Wait for popover rendering (250ms)
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          
+          popoverItems = Array.from(document.querySelectorAll('button, a, div[role="menuitem"]')).filter(el => {
+            const cls = typeof el.className === 'string' ? el.className : '';
+            return cls.includes('popover-item') || el.getAttribute('data-autofocus') !== null;
+          });
+        }
+        
+        // Scan active popover items
+        const options = [];
+        popoverItems.forEach(el => {
+          const text = (el.textContent || '').trim();
+          if (text) {
+            // Clean up helper words like 'Fast' from model options
+            let cleanText = text;
+            if (text.endsWith('Fast')) {
+              cleanText = text.substring(0, text.length - 4).trim();
+            }
+            if (!options.includes(cleanText)) {
+              options.push(cleanText);
+            }
+          }
+        });
+        
+        // Close popover ONLY if we opened it ourselves
+        if (openedByUs) {
+          btn.click();
+        }
+        
         return {
-          type: 'custom_button',
-          current: (btn.textContent || '').trim(),
-          options: []
+          type: 'popover',
+          current,
+          options
         };
       }
+      
       return {
         type: 'fallback',
-        current: 'Gemini 1.5 Pro',
-        options: ['Gemini 1.5 Pro', 'Gemini 1.5 Flash', 'Claude 3.5 Sonnet', 'GPT-4o']
+        current: 'Gemini 3.5 Flash (Medium)',
+        options: ['Gemini 3.5 Flash (Medium)', 'Gemini 3.5 Flash (High)', 'Gemini 3.5 Flash (Low)', 'Gemini 3.1 Pro (Low)', 'Gemini 3.1 Pro (High)', 'Claude Sonnet 4.6 (Thinking)', 'Claude Opus 4.6 (Thinking)', 'GPT-OSS 120B (Medium)']
       };
     })()`);
   }
@@ -721,7 +811,7 @@ class CdpClient extends EventEmitter {
   /** Select and change the AI model via remote DOM clicking */
   async changeAiModel(modelName) {
     await this.connect();
-    return this.evaluate(`(() => {
+    return this.evaluate(`(async () => {
       // 1. Standard HTML select dropdown
       const select = document.querySelector('select[class*="model"], select[id*="model"]');
       if (select) {
@@ -736,15 +826,53 @@ class CdpClient extends EventEmitter {
         }
       }
       
-      // 2. Custom dropdown button options click
-      const buttons = Array.from(document.querySelectorAll('button, span, a, div'));
-      const targetOption = buttons.find(el => {
-        const text = (el.textContent || '').trim().toLowerCase();
-        return text === ${JSON.stringify(modelName)}.toLowerCase() || text.includes(${JSON.stringify(modelName)}.toLowerCase());
-      });
-      if (targetOption) {
-        targetOption.click();
-        return { ok: true, model: targetOption.textContent.trim() };
+      // 2. Custom React popover button selector
+      const btn = document.querySelector('button[aria-label*="Select model"], button[aria-label*="model"], button[class*="model-selector"], [class*="model-select"]');
+      if (btn) {
+        // Check if popover is already open
+        let popoverItems = Array.from(document.querySelectorAll('button, a, div[role="menuitem"]')).filter(el => {
+          const cls = typeof el.className === 'string' ? el.className : '';
+          return cls.includes('popover-item') || el.getAttribute('data-autofocus') !== null;
+        });
+        
+        if (popoverItems.length === 0) {
+          // Open popover by clicking
+          btn.click();
+          // Wait for popover rendering (250ms)
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          
+          popoverItems = Array.from(document.querySelectorAll('button, a, div[role="menuitem"]')).filter(el => {
+            const cls = typeof el.className === 'string' ? el.className : '';
+            return cls.includes('popover-item') || el.getAttribute('data-autofocus') !== null;
+          });
+        }
+        
+        // Find matching option
+        const targetEl = popoverItems.find(el => {
+          const text = (el.textContent || '').trim().toLowerCase();
+          const cleanText = text.replace(/fast$/i, '').trim();
+          const query = ${JSON.stringify(modelName)}.toLowerCase();
+          return cleanText === query || text === query || cleanText.includes(query) || query.includes(cleanText);
+        });
+        
+        if (targetEl) {
+          // Simulate robust MouseEvents for React/Radix to register the select trigger
+          try {
+            targetEl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, buttons: 1 }));
+            targetEl.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+            targetEl.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          } catch (e) {}
+          
+          try {
+            targetEl.click();
+          } catch (e) {}
+          
+          const finalModelName = targetEl.textContent.trim().replace(/fast$/i, '').trim();
+          return { ok: true, model: finalModelName };
+        }
+        
+        // Close popover if option not found (toggles it closed)
+        btn.click();
       }
       
       return { ok: false, error: 'Model option not found: ' + ${JSON.stringify(modelName)} };

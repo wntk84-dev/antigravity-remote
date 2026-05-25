@@ -12,6 +12,9 @@ let lastSelectedOption = '';
 let lastSelectedAction = '';
 let activeApprovalHeader = '';
 
+let selectedProjectUrl = null;
+let selectedProjectTitle = null;
+
 console.log(`
   ╔══════════════════════════════════╗
   ║   Antigravity Remote  v1.0.0    ║
@@ -37,28 +40,137 @@ async function main() {
     // Commands
     if (text === '/start') {
       return tg.sendMessage(chatId,
-        '🚀 Antigravity Remote\n\n' +
-        '📝 메시지를 보내면 Antigravity에 전달됩니다.\n' +
+        '🚀 *Antigravity Remote*\n\n' +
+        '📂 /project - 대화할 프로젝트 선택\n' +
+        '📝 메시지를 보내면 선택한 프로젝트의 Antigravity에 전달됩니다.\n' +
         '📸 /screenshot - 화면 캡처\n' +
         '📊 /status - 연결 상태\n' +
-        '🛑 /stop - 생성 중단'
+        '🛑 /stop - 생성 중단\n' +
+        '🆕 /new - 새 대화 세션 생성',
+        { parse_mode: 'Markdown' }
       );
+    }
+
+    if (text === '/project') {
+      try {
+        const pages = await cdp.getPagesList();
+        if (pages.length === 0) {
+          return tg.sendMessage(chatId, '❌ 활성화된 Antigravity 프로젝트 창을 발견하지 못했습니다.\nAntigravity 앱이 실행 중이고 프로젝트가 열려 있는지 확인해 주세요.');
+        }
+
+        const allConversations = [];
+
+        await Promise.all(pages.map(async (page) => {
+          try {
+            const tempClient = new cdp.constructor();
+            await tempClient.connect(page.webSocketDebuggerUrl);
+            
+            const list = await tempClient.evaluate(`(() => {
+              const h2 = Array.from(document.querySelectorAll('h2')).find(el => el.innerText.trim() === 'Projects');
+              if (!h2) return [];
+              const parent = h2.parentElement.parentElement;
+              if (!parent) return [];
+              
+              const results = [];
+              const items = parent.querySelectorAll('[role="button"]');
+              let currentProject = 'workspace';
+              
+              items.forEach(item => {
+                const text = (item.innerText || '').trim();
+                if (!text) return;
+                
+                if (item.getAttribute('data-project-card') === 'true') {
+                  currentProject = text;
+                } else if (item.className.includes('ml-[')) {
+                  const title = text.split('\\n')[0].trim();
+                  results.push({
+                    title: title,
+                    fullText: text
+                  });
+                }
+              });
+              return results;
+            })()`);
+            
+            await tempClient.ws.close();
+            
+            if (list && list.length > 0) {
+              list.forEach(item => {
+                allConversations.push({
+                  webSocketDebuggerUrl: page.webSocketDebuggerUrl,
+                  project: 'workspace',
+                  title: item.title,
+                  type: 'conversation'
+                });
+              });
+            }
+          } catch (e) {
+            console.error('Failed to scan sidebar conversations:', e.message);
+          }
+        }));
+
+        // Fallback to simple page titles if no sidebar conversations are detected
+        if (allConversations.length === 0) {
+          pages.forEach(p => {
+            let t = p.title || '글로벌 대화방';
+            if (t.includes(' — ')) t = t.split(' — ')[0].trim();
+            allConversations.push({
+              webSocketDebuggerUrl: p.webSocketDebuggerUrl,
+              project: 'workspace',
+              title: t,
+              type: 'page'
+            });
+          });
+        }
+
+        const keyboard = {
+          inline_keyboard: allConversations.map((convo, idx) => {
+            let displayTitle = convo.title;
+            if (displayTitle.length > 25) {
+              displayTitle = displayTitle.substring(0, 23) + '...';
+            }
+            
+            const isSelected = convo.webSocketDebuggerUrl === selectedProjectUrl && convo.title === selectedProjectTitle;
+            
+            return [{
+              text: isSelected ? `🔘 ${displayTitle}` : `⚪️ ${displayTitle}`,
+              callback_data: `selectproject:${idx}`
+            }];
+          })
+        };
+
+        global.lastCdpConversationsList = allConversations;
+
+        return tg.api('sendMessage', {
+          chat_id: chatId,
+          text: `📂 **대화방 선택**\n\n현재 열려 있는 프로젝트의 대화방 목록입니다. 대화할 방을 선택해 주세요.`,
+          parse_mode: 'Markdown',
+          reply_markup: keyboard
+        });
+      } catch (err) {
+        return tg.sendMessage(chatId, `❌ 대화방 목록 조회 실패: ${err.message}`);
+      }
     }
 
     if (text === '/status') {
       try {
-        await cdp.connect();
-        const title = await cdp.evaluate('document.title');
-        return tg.sendMessage(chatId, `✅ Connected\n📄 ${title || '(untitled)'}`);
+        if (!selectedProjectUrl) {
+          return tg.sendMessage(chatId, `⚠️ 연결 상태: Disconnected (프로젝트 미선택)\n/project 명령어를 사용하여 프로젝트를 선택해 주세요.`);
+        }
+        await cdp.connect(selectedProjectUrl);
+        return tg.sendMessage(chatId, `✅ 연결 상태: Connected\n📂 활성 프로젝트: *${selectedProjectTitle}*`, { parse_mode: 'Markdown' });
       } catch (err) {
         return tg.sendMessage(chatId, `❌ Disconnected\n${err.message}`);
       }
     }
 
     if (text === '/screenshot') {
+      if (!selectedProjectUrl) {
+        return tg.sendMessage(chatId, '⚠️ 프로젝트를 먼저 선택해 주세요. (/project)');
+      }
       try {
         const status = await tg.sendMessage(chatId, '📸 Capturing...');
-        await cdp.connect();
+        await cdp.connect(selectedProjectUrl);
         const png = await cdp.screenshot();
         await tg.sendPhoto(chatId, png);
         await tg.deleteMessage(chatId, status.message_id);
@@ -69,8 +181,12 @@ async function main() {
     }
 
     if (text === '/stop') {
+      if (!selectedProjectUrl) {
+        return tg.sendMessage(chatId, '⚠️ 프로젝트를 먼저 선택해 주세요. (/project)');
+      }
       monitor.stop();
       try {
+        await cdp.connect(selectedProjectUrl);
         await cdp.evaluate(`(() => {
           const btn = document.querySelector('button[aria-label*="Stop"], button[aria-label*="stop"]');
           if (btn) btn.click();
@@ -80,8 +196,11 @@ async function main() {
     }
 
     if (text === '/new' || text === '/newchat') {
+      if (!selectedProjectUrl) {
+        return tg.sendMessage(chatId, '⚠️ 프로젝트를 먼저 선택해 주세요. (/project)');
+      }
       try {
-        await cdp.connect();
+        await cdp.connect(selectedProjectUrl);
         const res = await cdp.createNewSession();
         if (res?.ok) {
           return tg.sendMessage(chatId, '🆕 새로운 대화 세션이 성공적으로 생성되었습니다!');
@@ -94,8 +213,11 @@ async function main() {
     }
 
     if (text === '/model') {
+      if (!selectedProjectUrl) {
+        return tg.sendMessage(chatId, '⚠️ 프로젝트를 먼저 선택해 주세요. (/project)');
+      }
       try {
-        await cdp.connect();
+        await cdp.connect(selectedProjectUrl);
         const res = await cdp.getAvailableModels();
         const currentModel = res?.current || '알 수 없음';
         const options = res?.options || [];
@@ -124,11 +246,15 @@ async function main() {
 
     if (text.startsWith('/')) return; // Ignore unknown commands
 
+    if (!selectedProjectUrl) {
+      return tg.sendMessage(chatId, '⚠️ 작업할 프로젝트가 선택되지 않았습니다.\n\n먼저 `/project` 명령어를 사용하여 대화할 프로젝트를 선택해 주세요.', { parse_mode: 'Markdown' });
+    }
+
     // ── Send message to Antigravity ──
     let statusMsg;
     try {
       console.log('  [1] Connecting to CDP...');
-      await cdp.connect();
+      await cdp.connect(selectedProjectUrl);
       console.log('  [2] Sending status to Telegram...');
       statusMsg = await tg.sendMessage(chatId, '⏳ Sending...');
       console.log('  [3] Injecting message to Antigravity...');
@@ -227,46 +353,7 @@ async function main() {
           console.log(`  [approval] Received approval request with buttons: ${buttonTexts.join(', ')} (Header: ${headerText})`);
           activeApprovalHeader = headerText || '';
 
-          // ⚡ 무인 자율 자동 승인 (Auto-Approval Bypass)
-          const lowerHeader = activeApprovalHeader.toLowerCase();
-          const isDestructive = lowerHeader.includes('format') || 
-                                lowerHeader.includes('erase') || 
-                                lowerHeader.includes('rm -rf /') || 
-                                lowerHeader.includes('destructive') || 
-                                lowerHeader.includes('포맷') || 
-                                lowerHeader.includes('초기화');
-
-          if (!isDestructive) {
-            console.log(`  [auto-approval] ⚡ Safe developer action detected: "${activeApprovalHeader}". Auto-approving safely...`);
-            
-            const yesOption = buttonTexts.find(text => {
-              const lower = text.toLowerCase();
-              return lower.includes('allow this time') || lower.includes('yes') || lower.includes('allow') || lower.includes('승인') || lower.includes('허용');
-            });
-            
-            const submitOption = buttonTexts.find(text => {
-              const lower = text.toLowerCase();
-              return lower.includes('submit') || lower.includes('run') || lower.includes('confirm') || lower.includes('확인') || lower.includes('실행');
-            });
-
-            if (yesOption && submitOption) {
-              console.log(`  [auto-approval] Self-clicking Option: "${yesOption}" -> Action: "${submitOption}"`);
-              const optRes = await cdp.clickButton(yesOption);
-              if (optRes?.ok) {
-                await new Promise((r) => setTimeout(r, 250));
-                const actRes = await cdp.clickButton(submitOption);
-                if (actRes?.ok) {
-                  console.log(`  [auto-approval] ✅ Successfully auto-approved safely without Telegram alert!`);
-                  monitor.lastSettledApprovalKey = monitor.lastApprovalKey;
-                  await cdp.evaluate(`(() => {
-                    window.antigravityApprovalCoolingKey = ${JSON.stringify(monitor.lastApprovalKey)};
-                    setTimeout(() => { window.antigravityApprovalCoolingKey = ''; }, 1500);
-                  })()`).catch(() => {});
-                  return; // 자율 승인 완료로 텔레그램 승인 창 스킵!
-                }
-              }
-            }
-          }
+          // ⚡ 무인 자율 자동 승인 (Auto-Approval Bypass) - 비활성화됨 (사용자가 직접 수동 승인하도록 텔레그램으로 항상 전달)
           
           const optionKeywords = ['yes, allow this time', 'yes', 'no', 'allow this time', 'deny', 'allow once', '승인', '허용', '거절', '허가'];
           const actionKeywords = ['submit', 'run', 'skip', 'cancel', 'reject', 'close', '확인', '실행'];
@@ -406,6 +493,70 @@ async function main() {
   // ── Callback query handler ──
   tg.onCallback(async (query) => {
     try {
+      if (query.data.startsWith('selectproject:')) {
+        const idx = parseInt(query.data.substring('selectproject:'.length), 10);
+        const convos = global.lastCdpConversationsList || [];
+        const targetConvo = convos[idx];
+        
+        if (!targetConvo) {
+          return tg.answerCallback(query.id, '❌ 만료된 요청입니다. 다시 /project를 입력해 주세요.');
+        }
+
+        const title = targetConvo.title;
+        let displayTitle = title;
+        if (displayTitle.length > 25) {
+          displayTitle = displayTitle.substring(0, 23) + '...';
+        }
+
+        selectedProjectUrl = targetConvo.webSocketDebuggerUrl;
+        selectedProjectTitle = title;
+        cdp.targetUrl = selectedProjectUrl; // Update cdp target URL
+
+        console.log(`  [bot] Project/Conversation selected: "${title}" (${selectedProjectUrl})`);
+        
+        try {
+          await cdp.connect(selectedProjectUrl);
+          
+          if (targetConvo.type === 'conversation') {
+            const clickRes = await cdp.evaluate(`(() => {
+              const h2 = Array.from(document.querySelectorAll('h2')).find(el => el.innerText.trim() === 'Projects');
+              if (!h2) return { ok: false, error: 'Projects header not found' };
+              const parent = h2.parentElement.parentElement;
+              if (!parent) return { ok: false, error: 'Projects parent not found' };
+              
+              const items = parent.querySelectorAll('[role="button"]');
+              const targetTitle = ${JSON.stringify(title)};
+              
+              for (const item of items) {
+                const text = (item.innerText || '').trim();
+                const title = text.split('\\n')[0].trim();
+                if (item.className.includes('ml-[') && (title === targetTitle || title.includes(targetTitle) || targetTitle.includes(title))) {
+                  item.click();
+                  return { ok: true, clicked: title };
+                }
+              }
+              return { ok: false, error: 'Conversation item not found in sidebar' };
+            })()`);
+            console.log(`  [cdp] Sidebar click outcome for "${title}":`, clickRes);
+          }
+          
+          await cdp.call('Page.bringToFront');
+          console.log(`  [cdp] 🚀 Page.bringToFront and focus successful`);
+        } catch (focusErr) {
+          console.warn(`  [cdp] ⚠️ Failed to click conversation or focus:`, focusErr.message);
+        }
+
+        await tg.answerCallback(query.id, `선택됨: ${displayTitle}`);
+        
+        await tg.api('editMessageText', {
+          chat_id: query.message.chat.id,
+          message_id: query.message.message_id,
+          text: `📂 **대화방 선택 완료**\n\n현재 활성화된 대화방: *${displayTitle}*\n\n이제 메시지를 입력하시면 해당 대화방의 Antigravity로 바로 전달됩니다!`,
+          parse_mode: 'Markdown'
+        });
+        return;
+      }
+
       if (query.data.startsWith('changemodel:')) {
         const targetModel = query.data.substring('changemodel:'.length);
         console.log(`  [bot] Changing AI model to: "${targetModel}"`);
