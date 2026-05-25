@@ -430,7 +430,22 @@ class CdpClient extends EventEmitter {
             }
             if (hasActiveButtons) {
               isPermissionOpen = true;
-              matchedText = text.substring(0, 60);
+              
+              // 모달 컨테이너 내에서 실제 승인 질문을 담고 있는 가장 구체적인 타이틀/헤더 요소를 쿼리하여 조준합니다.
+              let targetEl = el;
+              const subItems = Array.from(container.querySelectorAll('h1, h2, h3, h4, p, span, div.text-sm, [class*="title"], [class*="header"]'));
+              const realQuestionEl = subItems.find(sub => {
+                const subText = sub.textContent || '';
+                return subText.includes('Allow running') || subText.includes('Allow write') || 
+                       subText.includes('Allow read') || subText.includes('Allow permission') || 
+                       subText.includes('Allow folder') || subText.includes('Allow execute') ||
+                       subText.includes('승인') || subText.includes('허용');
+              });
+              if (realQuestionEl) {
+                targetEl = realQuestionEl;
+              }
+              
+              matchedText = (targetEl.textContent || '').trim().substring(0, 120);
               
               const dynamicButtons = [];
               for (const subEl of containerElements) {
