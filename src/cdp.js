@@ -435,7 +435,15 @@ class CdpClient extends EventEmitter {
               let targetEl = el;
               const subItems = Array.from(container.querySelectorAll('h1, h2, h3, h4, p, span, div.text-sm, [class*="title"], [class*="header"]'));
               const realQuestionEl = subItems.find(sub => {
-                const subText = sub.textContent || '';
+                const tag = (sub.tagName || '').toLowerCase();
+                if (tag === 'style' || tag === 'script') return false; // style, script 태그 원천 격리
+                
+                const subText = (sub.textContent || '').trim();
+                // CSS 스타일코드나 주석 찌꺼기 필터링 배제
+                if (subText.startsWith('/*') || subText.includes('{') || subText.includes('prefers-color-scheme')) {
+                  return false;
+                }
+                
                 return subText.includes('Allow running') || subText.includes('Allow write') || 
                        subText.includes('Allow read') || subText.includes('Allow permission') || 
                        subText.includes('Allow folder') || subText.includes('Allow execute') ||
