@@ -1,0 +1,14 @@
+# Dependency directories
+node_modules/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# Runtime data
+.env
+.env.local
+
+# OS Files
+.DS_Store
