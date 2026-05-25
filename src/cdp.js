@@ -326,57 +326,154 @@ class CdpClient extends EventEmitter {
       function isInsideAntiTargets(el) {
         let curr = el;
         while (curr) {
-          if (curr.className && typeof curr.className === 'string') {
-            const cls = curr.className.toLowerCase();
+          // 1. Check aria-label
+          try {
+            const aria = (curr.getAttribute('aria-label') || '').toLowerCase();
+            if (
+              aria.includes('user message') || 
+              aria.includes('agent response') || 
+              aria.includes('response') || 
+              aria.includes('message') || 
+              aria.includes('chat') ||
+              aria.includes('history') ||
+              aria.includes('conversation')
+            ) {
+              return true;
+            }
+          } catch (e) {}
+
+          // 2. Check data attributes (React/Next role tags)
+          try {
+            if (curr.attributes) {
+              for (let i = 0; i < curr.attributes.length; i++) {
+                const attr = curr.attributes[i];
+                const name = attr.name.toLowerCase();
+                const val = attr.value.toLowerCase();
+                if (
+                  (name.includes('role') && (val.includes('message') || val.includes('response') || val.includes('log') || val.includes('presentation'))) ||
+                  name.includes('turn') ||
+                  name.includes('author') ||
+                  name.includes('message') ||
+                  name.includes('chat') ||
+                  val.includes('assistant') ||
+                  val.includes('user') ||
+                  val.includes('prose') ||
+                  val.includes('markdown')
+                ) {
+                  return true;
+                }
+              }
+            }
+          } catch (e) {}
+
+          // 3. Check classes & IDs (Safely handling SVGAnimatedString)
+          try {
+            let cls = '';
+            if (curr.className) {
+              if (typeof curr.className === 'string') {
+                cls = curr.className.toLowerCase();
+              } else if (typeof curr.className === 'object' && curr.className.baseVal) {
+                cls = curr.className.baseVal.toLowerCase();
+              }
+            }
+            const id = (curr.id || '').toLowerCase();
+
             if (
               cls.includes('editor') || cls.includes('monaco') || 
               cls.includes('chat') || cls.includes('message') || 
               cls.includes('history') || cls.includes('bubble') || 
               cls.includes('terminal') || cls.includes('console') || 
-              cls.includes('log')
-            ) return true;
-          }
-          if (curr.id && typeof curr.id === 'string') {
-            const id = curr.id.toLowerCase();
-            if (
+              cls.includes('log') || cls.includes('prose') ||
+              cls.includes('markdown') || cls.includes('response') ||
+              cls.includes('output') || cls.includes('thought') ||
+              cls.includes('code') || cls.includes('pre') ||
+              cls.includes('sidebar') || cls.includes('panel') ||
+              cls.includes('workspace') || cls.includes('project') ||
+              
               id.includes('editor') || id.includes('monaco') || 
               id.includes('chat') || id.includes('message') || 
-              id.includes('terminal') || id.includes('console')
-            ) return true;
-          }
-          try {
-            const role = curr.getAttribute('role');
-            if (role && (role === 'code' || role === 'textbox')) return true;
+              id.includes('terminal') || id.includes('console') ||
+              id.includes('sidebar') || id.includes('workspace')
+            ) {
+              return true;
+            }
           } catch (e) {}
-          curr = curr.parentElement || (curr.parentNode && curr.parentNode.host) || null;
+
+          // 4. Check standard role
+          try {
+            const role = (curr.getAttribute('role') || '').toLowerCase();
+            if (
+              role === 'code' || 
+              role === 'textbox' || 
+              role === 'log' || 
+              role === 'document' || 
+              role === 'article' ||
+              role.includes('chat') || 
+              role.includes('message')
+            ) {
+              return true;
+            }
+          } catch (e) {}
+
+          // 5. Traverse Shadow DOM and Iframe boundaries
+          let parent = curr.parentElement;
+          if (!parent && curr.parentNode) {
+            parent = curr.parentNode.host || curr.parentNode;
+          }
+          if (!parent && curr.ownerDocument && curr.ownerDocument.defaultView && curr.ownerDocument.defaultView.frameElement) {
+            parent = curr.ownerDocument.defaultView.frameElement;
+          }
+          curr = parent || null;
         }
         return false;
       }
 
       function findModalContainer(el) {
         let curr = el;
+        // 1. Search for genuine modal elements up the tree
         while (curr) {
-          if (curr.tagName && curr.tagName.toLowerCase() === 'dialog') return curr;
+          const tag = (curr.tagName || '').toLowerCase();
+          if (tag === 'dialog') return curr;
           try {
             const role = curr.getAttribute('role');
             if (role === 'dialog' || role === 'alertdialog') return curr;
           } catch (e) {}
-          if (curr.className && typeof curr.className === 'string') {
-            const cls = curr.className.toLowerCase();
-            if (
-              cls.includes('dialog') || cls.includes('modal') || 
-              cls.includes('popup') || cls.includes('overlay') || 
-              cls.includes('callout')
-            ) return curr;
+          
+          let cls = '';
+          if (curr.className) {
+            if (typeof curr.className === 'string') cls = curr.className.toLowerCase();
+            else if (typeof curr.className === 'object' && curr.className.baseVal) cls = curr.className.baseVal.toLowerCase();
           }
-          curr = curr.parentElement || (curr.parentNode && curr.parentNode.host) || null;
+          if (
+            cls.includes('dialog') || cls.includes('modal') || 
+            cls.includes('popup') || cls.includes('overlay') || 
+            cls.includes('callout') || cls.includes('notification') ||
+            cls.includes('toast') || cls.includes('prompt') ||
+            cls.includes('popover')
+          ) return curr;
+          
+          let parent = curr.parentElement;
+          if (!parent && curr.parentNode) parent = curr.parentNode.host || curr.parentNode;
+          curr = parent || null;
         }
+        
+        // 2. Fallback to 3 parent levels
         let fallback = el;
         for (let i = 0; i < 3; i++) {
-          if (fallback && (fallback.parentElement || fallback.parentNode.host)) {
-            fallback = fallback.parentElement || fallback.parentNode.host;
+          if (fallback) {
+            let parent = fallback.parentElement;
+            if (!parent && fallback.parentNode) parent = fallback.parentNode.host || fallback.parentNode;
+            fallback = parent;
           }
         }
+        
+        // 3. Absolute prevention: If fallback is body, html or inside chat prose, reject completely
+        if (fallback) {
+          const tag = (fallback.tagName || '').toLowerCase();
+          if (tag === 'body' || tag === 'html') return null;
+          if (isInsideAntiTargets(fallback)) return null;
+        }
+        
         return fallback;
       }
 
@@ -429,32 +526,6 @@ class CdpClient extends EventEmitter {
               }
             }
             if (hasActiveButtons) {
-              isPermissionOpen = true;
-              
-              // 모달 컨테이너 내에서 실제 승인 질문을 담고 있는 가장 구체적인 타이틀/헤더 요소를 쿼리하여 조준합니다.
-              let targetEl = el;
-              const subItems = Array.from(container.querySelectorAll('h1, h2, h3, h4, p, span, div.text-sm, [class*="title"], [class*="header"]'));
-              const realQuestionEl = subItems.find(sub => {
-                const tag = (sub.tagName || '').toLowerCase();
-                if (tag === 'style' || tag === 'script') return false; // style, script 태그 원천 격리
-                
-                const subText = (sub.textContent || '').trim();
-                // CSS 스타일코드나 주석 찌꺼기 필터링 배제
-                if (subText.startsWith('/*') || subText.includes('{') || subText.includes('prefers-color-scheme')) {
-                  return false;
-                }
-                
-                return subText.includes('Allow running') || subText.includes('Allow write') || 
-                       subText.includes('Allow read') || subText.includes('Allow permission') || 
-                       subText.includes('Allow folder') || subText.includes('Allow execute') ||
-                       subText.includes('승인') || subText.includes('허용');
-              });
-              if (realQuestionEl) {
-                targetEl = realQuestionEl;
-              }
-              
-              matchedText = (targetEl.textContent || '').trim().substring(0, 120);
-              
               const dynamicButtons = [];
               for (const subEl of containerElements) {
                 const tag = (subEl.tagName || '').toLowerCase();
@@ -470,11 +541,48 @@ class CdpClient extends EventEmitter {
                 }
               }
 
-              if (dynamicButtons.length > 0) {
-                foundButtons = dynamicButtons;
-              } else {
-                foundButtons = ["Yes, allow this time", "No", "Submit", "Skip", "이번만 허용", "거절", "확인", "실행", "취소"];
+              const candidates = dynamicButtons.length > 0 ? dynamicButtons : ["Yes, allow this time", "No", "Submit", "Skip", "이번만 허용", "거절", "확인", "실행", "취소"];
+
+              // Double-verification: ensure at least one button matches permission actions
+              const hasRealApprovalButton = candidates.some(btnText => {
+                const b = btnText.toLowerCase();
+                return b.includes('allow') || b.includes('yes') || b.includes('submit') || 
+                       b.includes('skip') || b.includes('ok') || b.includes('agree') || 
+                       b.includes('approve') || b.includes('deny') || b.includes('reject') || 
+                       b.includes('cancel') || b.includes('승인') || b.includes('허용') || 
+                       b.includes('확인') || b.includes('실행') || b.includes('거절') || 
+                       b.includes('취소') || b.includes('이번만');
+              });
+
+              if (!hasRealApprovalButton) {
+                continue; // Skip fake modals
               }
+
+              isPermissionOpen = true;
+              foundButtons = candidates;
+
+              // Pinpoint the most descriptive header inside the container
+              let targetEl = el;
+              const subItems = Array.from(container.querySelectorAll('h1, h2, h3, h4, p, span, div.text-sm, [class*="title"], [class*="header"]'));
+              const realQuestionEl = subItems.find(sub => {
+                const tag = (sub.tagName || '').toLowerCase();
+                if (tag === 'style' || tag === 'script') return false;
+                
+                const subText = (sub.textContent || '').trim();
+                if (subText.startsWith('/*') || subText.includes('{') || subText.includes('prefers-color-scheme')) {
+                  return false;
+                }
+                
+                return subText.includes('Allow running') || subText.includes('Allow write') || 
+                       subText.includes('Allow read') || subText.includes('Allow permission') || 
+                       subText.includes('Allow folder') || subText.includes('Allow execute') ||
+                       subText.includes('승인') || subText.includes('허용');
+              });
+              if (realQuestionEl) {
+                targetEl = realQuestionEl;
+              }
+              
+              matchedText = (targetEl.textContent || '').trim().substring(0, 120);
               break;
             }
           }
@@ -483,7 +591,6 @@ class CdpClient extends EventEmitter {
         if (isPermissionOpen) {
           const currentKey = foundButtons.join(',') + '|' + matchedText;
           
-          // 고유 키 기반 정밀 쿨다운 락 (동일 모달의 깜빡임만 Mute, 다른 모달은 Bypass)
           if (window.antigravityApprovalCoolingKey && window.antigravityApprovalCoolingKey === currentKey) {
             return;
           }
@@ -509,7 +616,6 @@ class CdpClient extends EventEmitter {
               }));
             }
           }
-          // 모달이 완전히 닫히면 쿨다운 락 키를 스스로 제거(자가 청소)
           window.antigravityApprovalCoolingKey = '';
         }
       }
