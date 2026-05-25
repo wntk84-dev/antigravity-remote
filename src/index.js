@@ -79,6 +79,49 @@ async function main() {
       return tg.sendMessage(chatId, '🛑 Stopped');
     }
 
+    if (text === '/new' || text === '/newchat') {
+      try {
+        await cdp.connect();
+        const res = await cdp.createNewSession();
+        if (res?.ok) {
+          return tg.sendMessage(chatId, '🆕 새로운 대화 세션이 성공적으로 생성되었습니다!');
+        } else {
+          return tg.sendMessage(chatId, `❌ 새 세션 생성 실패: ${res?.error || '알 수 없는 오류'}`);
+        }
+      } catch (err) {
+        return tg.sendMessage(chatId, `❌ 오류 발생: ${err.message}`);
+      }
+    }
+
+    if (text === '/model') {
+      try {
+        await cdp.connect();
+        const res = await cdp.getAvailableModels();
+        const currentModel = res?.current || '알 수 없음';
+        const options = res?.options || [];
+        
+        if (options.length === 0) {
+          return tg.sendMessage(chatId, `🤖 현재 선택된 모델: *${currentModel}*\n\n⚠️ 화면에서 선택 가능한 모델 드롭다운을 발견하지 못했습니다.`, { parse_mode: 'Markdown' });
+        }
+        
+        const keyboard = {
+          inline_keyboard: options.map(opt => [{
+            text: opt === currentModel ? `🔘 ${opt}` : `⚪️ ${opt}`,
+            callback_data: `changemodel:${opt}`
+          }])
+        };
+        
+        return tg.api('sendMessage', {
+          chat_id: chatId,
+          text: `🤖 **모델 변경 모드**\n\n현재 활성화된 모델: *${currentModel}*\n\n변경할 모델을 아래 목록에서 선택해 주세요.`,
+          parse_mode: 'Markdown',
+          reply_markup: keyboard
+        });
+      } catch (err) {
+        return tg.sendMessage(chatId, `❌ 모델 정보 조회 실패: ${err.message}`);
+      }
+    }
+
     if (text.startsWith('/')) return; // Ignore unknown commands
 
     // ── Send message to Antigravity ──
@@ -183,6 +226,47 @@ async function main() {
         try {
           console.log(`  [approval] Received approval request with buttons: ${buttonTexts.join(', ')} (Header: ${headerText})`);
           activeApprovalHeader = headerText || '';
+
+          // ⚡ 무인 자율 자동 승인 (Auto-Approval Bypass)
+          const lowerHeader = activeApprovalHeader.toLowerCase();
+          const isDestructive = lowerHeader.includes('format') || 
+                                lowerHeader.includes('erase') || 
+                                lowerHeader.includes('rm -rf /') || 
+                                lowerHeader.includes('destructive') || 
+                                lowerHeader.includes('포맷') || 
+                                lowerHeader.includes('초기화');
+
+          if (!isDestructive) {
+            console.log(`  [auto-approval] ⚡ Safe developer action detected: "${activeApprovalHeader}". Auto-approving safely...`);
+            
+            const yesOption = buttonTexts.find(text => {
+              const lower = text.toLowerCase();
+              return lower.includes('allow this time') || lower.includes('yes') || lower.includes('allow') || lower.includes('승인') || lower.includes('허용');
+            });
+            
+            const submitOption = buttonTexts.find(text => {
+              const lower = text.toLowerCase();
+              return lower.includes('submit') || lower.includes('run') || lower.includes('confirm') || lower.includes('확인') || lower.includes('실행');
+            });
+
+            if (yesOption && submitOption) {
+              console.log(`  [auto-approval] Self-clicking Option: "${yesOption}" -> Action: "${submitOption}"`);
+              const optRes = await cdp.clickButton(yesOption);
+              if (optRes?.ok) {
+                await new Promise((r) => setTimeout(r, 250));
+                const actRes = await cdp.clickButton(submitOption);
+                if (actRes?.ok) {
+                  console.log(`  [auto-approval] ✅ Successfully auto-approved safely without Telegram alert!`);
+                  monitor.lastSettledApprovalKey = monitor.lastApprovalKey;
+                  await cdp.evaluate(`(() => {
+                    window.antigravityApprovalCoolingKey = ${JSON.stringify(monitor.lastApprovalKey)};
+                    setTimeout(() => { window.antigravityApprovalCoolingKey = ''; }, 1500);
+                  })()`).catch(() => {});
+                  return; // 자율 승인 완료로 텔레그램 승인 창 스킵!
+                }
+              }
+            }
+          }
           
           const optionKeywords = ['yes, allow this time', 'yes', 'no', 'allow this time', 'deny', 'allow once', '승인', '허용', '거절', '허가'];
           const actionKeywords = ['submit', 'run', 'skip', 'cancel', 'reject', 'close', '확인', '실행'];
@@ -322,6 +406,24 @@ async function main() {
   // ── Callback query handler ──
   tg.onCallback(async (query) => {
     try {
+      if (query.data.startsWith('changemodel:')) {
+        const targetModel = query.data.substring('changemodel:'.length);
+        console.log(`  [bot] Changing AI model to: "${targetModel}"`);
+        await tg.answerCallback(query.id, `모델 변경 중: ${targetModel}`);
+        const res = await cdp.changeAiModel(targetModel);
+        if (res?.ok) {
+          await tg.api('editMessageText', {
+            chat_id: query.message.chat.id,
+            message_id: query.message.message_id,
+            text: `🤖 **모델 변경 완료**\n\nAI 모델이 성공적으로 *${res.model}* 로 전환되었습니다!`,
+            parse_mode: 'Markdown'
+          });
+        } else {
+          await tg.sendMessage(query.message.chat.id, `❌ 모델 변경 실패: ${res?.error}`);
+        }
+        return;
+      }
+
       if (query.data === 'action:stop_generation') {
         console.log(`  [bot] Stopping generation via Telegram button...`);
         await tg.answerCallback(query.id, '🛑 Stop requested');

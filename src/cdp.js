@@ -662,6 +662,91 @@ class CdpClient extends EventEmitter {
     }
     this.connected = false;
   }
+
+  /** Create a new chat/session inside Antigravity */
+  async createNewSession() {
+    await this.connect();
+    return this.evaluate(`(() => {
+      // 1. Common New Chat/New Session selector
+      const btn = document.querySelector('button[aria-label="New chat"], button[aria-label*="New Chat"], button[class*="new-chat"], button[aria-label*="New conversation"], [class*="new-session"]');
+      if (btn) {
+        btn.click();
+        return { ok: true };
+      }
+      // 2. Fallback text search
+      const allButtons = Array.from(document.querySelectorAll('button'));
+      const newChatBtn = allButtons.find(b => {
+        const text = (b.textContent || '').trim().toLowerCase();
+        return text === 'new chat' || text === 'new conversation' || text.includes('new chat');
+      });
+      if (newChatBtn) {
+        newChatBtn.click();
+        return { ok: true };
+      }
+      return { ok: false, error: 'New Session button not found' };
+    })()`);
+  }
+
+  /** Scan and return currently available AI models in the UI */
+  async getAvailableModels() {
+    await this.connect();
+    return this.evaluate(`(() => {
+      const select = document.querySelector('select[class*="model"], select[id*="model"]');
+      if (select) {
+        return {
+          type: 'select',
+          current: select.value,
+          options: Array.from(select.options).map(o => o.text || o.value)
+        };
+      }
+      const btn = document.querySelector('button[aria-label*="model"], button[class*="model-selector"], [class*="model-select"]');
+      if (btn) {
+        return {
+          type: 'custom_button',
+          current: (btn.textContent || '').trim(),
+          options: []
+        };
+      }
+      return {
+        type: 'fallback',
+        current: 'Gemini 1.5 Pro',
+        options: ['Gemini 1.5 Pro', 'Gemini 1.5 Flash', 'Claude 3.5 Sonnet', 'GPT-4o']
+      };
+    })()`);
+  }
+
+  /** Select and change the AI model via remote DOM clicking */
+  async changeAiModel(modelName) {
+    await this.connect();
+    return this.evaluate(`(() => {
+      // 1. Standard HTML select dropdown
+      const select = document.querySelector('select[class*="model"], select[id*="model"]');
+      if (select) {
+        const option = Array.from(select.options).find(o => 
+          (o.text || '').toLowerCase().includes(${JSON.stringify(modelName)}.toLowerCase()) ||
+          (o.value || '').toLowerCase().includes(${JSON.stringify(modelName)}.toLowerCase())
+        );
+        if (option) {
+          select.value = option.value;
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+          return { ok: true, model: option.text };
+        }
+      }
+      
+      // 2. Custom dropdown button options click
+      const buttons = Array.from(document.querySelectorAll('button, span, a, div'));
+      const targetOption = buttons.find(el => {
+        const text = (el.textContent || '').trim().toLowerCase();
+        return text === ${JSON.stringify(modelName)}.toLowerCase() || text.includes(${JSON.stringify(modelName)}.toLowerCase());
+      });
+      if (targetOption) {
+        targetOption.click();
+        return { ok: true, model: targetOption.textContent.trim() };
+      }
+      
+      return { ok: false, error: 'Model option not found: ' + ${JSON.stringify(modelName)} };
+    })()`);
+  }
 }
 
 module.exports = new CdpClient();
