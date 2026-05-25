@@ -387,17 +387,6 @@ async function main() {
 
       const onComplete = async ({ html, text: responseText, elapsed }) => {
         try {
-          // ⚡ 안전장치: 대화 세션 완료 시점에 잔존하는 승인 키보드가 있다면 강제로 닫고 정화합니다.
-          if (activeApprovalMsgId) {
-            console.log(`  [auto-clean] Forced clearing lingering Telegram approval keyboard (msgId: ${activeApprovalMsgId})`);
-            await tg.api('editMessageText', {
-              chat_id: chatId,
-              message_id: activeApprovalMsgId,
-              text: `✅ 명령 실행 완료: 승인 처리가 내부적으로 정리되었습니다.`,
-              reply_markup: { inline_keyboard: [] }
-            }).catch(() => {});
-          }
-
           cleanup();
           console.log(`  [response] Sending ${responseText.length} chars to Telegram...`);
           const formatted = htmlToTelegram(html, responseText);
