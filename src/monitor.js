@@ -57,10 +57,21 @@ class ResponseMonitor extends EventEmitter {
           if (approvalKey === this.lastSettledApprovalKey) {
             // Already handled/submitted
           } else if (approvalKey !== this.lastApprovalKey) {
-            console.log(`  [monitor] ⚠️  (Reactive) Approval requested: ${approvalInfo.join(', ')} (Header: ${headerText})`);
+            const contentText = payload.content || '';
+            const diag = payload.diag || {};
+            console.log(`  [monitor] ⚠️  (Reactive) Approval requested: ${approvalInfo.join(', ')} (Header: ${headerText}) (Content: ${contentText})`);
+            if (diag.elTag) {
+              console.log(`  [monitor] 📊 Diag: el=${diag.elTag}.${diag.elClass || ''} textLen=${diag.elTextLen} rect=${JSON.stringify(diag.elRect)} nearbyBtns=${diag.nearbyBtnCount}`);
+            }
+            if (payload.htmlDumps) {
+              console.log('  [monitor] 📄 HTML Dumps:');
+              for (const [btnText, html] of Object.entries(payload.htmlDumps)) {
+                console.log(`    - [${btnText}]: ${html}`);
+              }
+            }
             this.lastApprovalKey = approvalKey;
             this.approvalActive = true;
-            this.emit('approval', approvalInfo, headerText);
+            this.emit('approval', approvalInfo, headerText, contentText);
           }
         } else if (payload.event === 'approval_resolved') {
           if (this.approvalActive) {

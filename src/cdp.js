@@ -52,6 +52,11 @@ class CdpClient extends EventEmitter {
     await this._connectWs();
     await this.call('Runtime.enable');
     console.log('✅ CDP connected');
+
+    // Automatically initialize approval binding and observer on connect!
+    await this.initApprovalBinding().catch(err => {
+      console.warn('  [cdp] ⚠️ Failed to auto-initialize approval binding:', err.message);
+    });
   }
 
   /** Fetch all available page targets from CDP */
@@ -435,51 +440,37 @@ class CdpClient extends EventEmitter {
 
       function findModalContainer(el) {
         let curr = el;
-        // 1. Search for genuine modal elements up the tree
         while (curr) {
           const tag = (curr.tagName || '').toLowerCase();
-          if (tag === 'dialog') return curr;
-          try {
-            const role = curr.getAttribute('role');
-            if (role === 'dialog' || role === 'alertdialog') return curr;
-          } catch (e) {}
+          if (tag === 'body' || tag === 'html') break;
           
-          let cls = '';
-          if (curr.className) {
-            if (typeof curr.className === 'string') cls = curr.className.toLowerCase();
-            else if (typeof curr.className === 'object' && curr.className.baseVal) cls = curr.className.baseVal.toLowerCase();
+          // Check if this parent contains active approval buttons
+          const subBtns = Array.from(curr.querySelectorAll('button, [role="button"], label, input[type="button"], input[type="submit"]'));
+          let hasApprovalButtons = false;
+          for (const btn of subBtns) {
+            if (!isVisible(btn)) continue;
+            const btnText = (btn.textContent || '').trim().toLowerCase();
+            if (
+              btnText.includes('allow this time') || 
+              btnText.includes('always allow') || 
+              btnText === 'submit' || 
+              btnText.includes('허용') ||
+              btnText.includes('승인')
+            ) {
+              hasApprovalButtons = true;
+              break;
+            }
           }
-          if (
-            cls.includes('dialog') || cls.includes('modal') || 
-            cls.includes('popup') || cls.includes('overlay') || 
-            cls.includes('callout') || cls.includes('notification') ||
-            cls.includes('toast') || cls.includes('prompt') ||
-            cls.includes('popover')
-          ) return curr;
+          
+          if (hasApprovalButtons) {
+            return curr;
+          }
           
           let parent = curr.parentElement;
           if (!parent && curr.parentNode) parent = curr.parentNode.host || curr.parentNode;
           curr = parent || null;
         }
-        
-        // 2. Fallback to 3 parent levels
-        let fallback = el;
-        for (let i = 0; i < 3; i++) {
-          if (fallback) {
-            let parent = fallback.parentElement;
-            if (!parent && fallback.parentNode) parent = fallback.parentNode.host || fallback.parentNode;
-            fallback = parent;
-          }
-        }
-        
-        // 3. Absolute prevention: If fallback is body, html or inside chat prose, reject completely
-        if (fallback) {
-          const tag = (fallback.tagName || '').toLowerCase();
-          if (tag === 'body' || tag === 'html') return null;
-          if (isInsideAntiTargets(fallback)) return null;
-        }
-        
-        return fallback;
+        return null;
       }
 
       let wasModalOpen = false;
@@ -515,79 +506,80 @@ class CdpClient extends EventEmitter {
             if (!container) continue;
 
             const containerElements = findAllElements(container);
-            let hasActiveButtons = false;
+            let hasStrictApprovalButtons = false;
             for (const subEl of containerElements) {
               if (!isVisible(subEl)) continue;
-              const btnText = (subEl.textContent || '').trim();
-              if (
-                btnText.includes('allow this time') || 
-                btnText.includes('Yes, allow') ||
-                btnText.includes('Submit') ||
-                btnText.includes('승인') ||
-                btnText.includes('허용')
-              ) {
-                hasActiveButtons = true;
-                break;
+              const tag = (subEl.tagName || '').toLowerCase();
+              const role = subEl.getAttribute('role') || '';
+              if (tag === 'button' || role === 'button' || tag === 'label' || tag === 'input') {
+                const btnText = (subEl.textContent || '').trim().toLowerCase();
+                if (btnText.includes('allow this time') || btnText.includes('always allow') || btnText === 'submit' || btnText.includes('허용')) {
+                  hasStrictApprovalButtons = true;
+                  break;
+                }
               }
             }
-            if (hasActiveButtons) {
+
+            if (hasStrictApprovalButtons) {
               const dynamicButtons = [];
               for (const subEl of containerElements) {
+                if (!isVisible(subEl)) continue;
                 const tag = (subEl.tagName || '').toLowerCase();
                 const role = subEl.getAttribute('role') || '';
-                const btnText = (subEl.textContent || '').trim();
+                let btnText = (subEl.textContent || '').trim();
                 
-                const isBtn = tag === 'button' || role === 'button' || (tag === 'input' && (subEl.type === 'button' || subEl.type === 'submit'));
+                // Clean up decorative symbols/carriage returns at the start/end
+                btnText = btnText.replace(/[\u21b5\u2190-\u21ff\u2600-\u27bf]/g, '').trim();
                 
-                if (isBtn && btnText && btnText.length > 0 && btnText.length < 30) {
+                // Add a space after prepended numbers (e.g. "1Yes" -> "1. Yes")
+                btnText = btnText.replace(/^(\d+)([a-zA-Z가-힣])/, '$1. $2');
+                
+                const isBtn = tag === 'button' || role === 'button' || tag === 'label' || (tag === 'input' && (subEl.type === 'button' || subEl.type === 'submit'));
+                if (isBtn && btnText && btnText.length > 0 && btnText.length < 50) {
                   if (!dynamicButtons.includes(btnText)) {
                     dynamicButtons.push(btnText);
                   }
                 }
               }
 
-              const candidates = dynamicButtons.length > 0 ? dynamicButtons : ["Yes, allow this time", "No", "Submit", "Skip", "이번만 허용", "거절", "확인", "실행", "취소"];
-
-              // Double-verification: ensure at least one button matches permission actions
-              const hasRealApprovalButton = candidates.some(btnText => {
-                const b = btnText.toLowerCase();
-                return b.includes('allow') || b.includes('yes') || b.includes('submit') || 
-                       b.includes('skip') || b.includes('ok') || b.includes('agree') || 
-                       b.includes('approve') || b.includes('deny') || b.includes('reject') || 
-                       b.includes('cancel') || b.includes('승인') || b.includes('허용') || 
-                       b.includes('확인') || b.includes('실행') || b.includes('거절') || 
-                       b.includes('취소') || b.includes('이번만');
-              });
-
-              if (!hasRealApprovalButton) {
-                continue; // Skip fake modals
-              }
-
+              const candidates = dynamicButtons.length > 0 ? dynamicButtons : ["Yes, allow this time", "No", "Submit", "Skip"];
               isPermissionOpen = true;
-              foundButtons = candidates;
-
-              // Pinpoint the most descriptive header inside the container
-              let targetEl = el;
-              const subItems = Array.from(container.querySelectorAll('h1, h2, h3, h4, p, span, div.text-sm, [class*="title"], [class*="header"]'));
+              
+              // 1. Find the main title/question
+              let titleText = '';
+              const subItems = Array.from(containerElements).flatMap(c => Array.from(c.querySelectorAll('h1, h2, h3, h4, p, span, div.text-sm, [class*="title"], [class*="header"]')));
               const realQuestionEl = subItems.find(sub => {
-                const tag = (sub.tagName || '').toLowerCase();
-                if (tag === 'style' || tag === 'script') return false;
-                
+                if (isInsideAntiTargets(sub)) return false;
                 const subText = (sub.textContent || '').trim();
-                if (subText.startsWith('/*') || subText.includes('{') || subText.includes('prefers-color-scheme')) {
-                  return false;
-                }
-                
+                if (subText.length > 200) return false;
                 return subText.includes('Allow running') || subText.includes('Allow write') || 
                        subText.includes('Allow read') || subText.includes('Allow permission') || 
                        subText.includes('Allow folder') || subText.includes('Allow execute') ||
                        subText.includes('승인') || subText.includes('허용');
               });
               if (realQuestionEl) {
-                targetEl = realQuestionEl;
+                titleText = (realQuestionEl.innerText || realQuestionEl.textContent || '').trim();
+              } else {
+                titleText = "Permission Request";
+              }
+
+              // 2. Find the code snippet or command body
+              let codeText = '';
+              const codeBlocks = Array.from(containerElements).flatMap(c => Array.from(c.querySelectorAll('pre, code, textarea, [class*="code"]')));
+              const validCodeBlocks = codeBlocks.filter(c => !isInsideAntiTargets(c));
+              if (validCodeBlocks.length > 0) {
+                 codeText = (validCodeBlocks[0].innerText || validCodeBlocks[0].textContent || '').trim();
+              }
+
+              // 3. Combine them to match the visual screenshot exactly
+              let finalText = titleText;
+              if (codeText) {
+                finalText += '\\n\\n' + codeText;
               }
               
-              matchedText = (targetEl.textContent || '').trim().substring(0, 120);
+              matchedText = finalText.substring(0, 1500);
+              
+              foundButtons = candidates;
               break;
             }
           }
@@ -647,42 +639,38 @@ class CdpClient extends EventEmitter {
     });
   }
 
-  /** Click a button by its text content */
   async clickButton(buttonText) {
     await this.connect();
+    
+    // Fallback direct action for Submit to bypass UI race conditions if needed
+    if (buttonText.toLowerCase().includes('submit')) {
+      try {
+        const fallbackRes = await this.evaluate(`(() => {
+          const form = document.querySelector('form');
+          if (form) {
+             const btn = form.querySelector('button[type="submit"]') || form.querySelector('button');
+             if (btn) { btn.click(); return true; }
+          }
+          const allBtns = Array.from(document.querySelectorAll('button'));
+          const submitBtns = allBtns.filter(b => (b.textContent||'').toLowerCase().includes('submit'));
+          if (submitBtns.length > 0) {
+             submitBtns[submitBtns.length - 1].click();
+             return true;
+          }
+          return false;
+        })()`);
+        if (fallbackRes) {
+          return { ok: true, method: 'fallback_submit' };
+        }
+      } catch (e) {}
+    }
+
     const findResult = await this.evaluate(`(() => {
       function findAllClickables(root = document) {
         let all = Array.from(root.querySelectorAll('*'));
-        
-        for (let i = 0; i < all.length; i++) {
-          const el = all[i];
-          
-          if (el.shadowRoot) {
-            const shadowEls = Array.from(el.shadowRoot.querySelectorAll('*'));
-            for (const sel of shadowEls) {
-              if (all.indexOf(sel) === -1) {
-                all.push(sel);
-              }
-            }
-          }
-          
-          if (el.tagName && el.tagName.toLowerCase() === 'iframe') {
-            try {
-              if (el.contentDocument) {
-                const iframeEls = Array.from(el.contentDocument.querySelectorAll('*'));
-                for (const iel of iframeEls) {
-                  if (all.indexOf(iel) === -1) {
-                    all.push(iel);
-                  }
-                }
-              }
-            } catch (e) {}
-          }
-        }
-        
         let clickables = all.filter(el => {
-          const tag = el.tagName.toLowerCase();
-          if (tag === 'button' || tag === 'a' || el.getAttribute('role') === 'button') {
+          const tag = (el.tagName || '').toLowerCase();
+          if (tag === 'button' || tag === 'a' || tag === 'label' || el.getAttribute('role') === 'button') {
             return true;
           }
           if (tag === 'input' && (el.type === 'button' || el.type === 'submit')) {
@@ -690,18 +678,13 @@ class CdpClient extends EventEmitter {
           }
           try {
             const style = window.getComputedStyle(el);
-            if (style && style.cursor === 'pointer') {
-              return true;
-            }
-          } catch (e) {}
+            if (style && style.cursor === 'pointer') return true;
+          } catch(e) {}
           return false;
         });
         
         return clickables.filter(el => {
-          const tag = el.tagName.toLowerCase();
-          if (tag === 'button' || tag === 'a' || el.getAttribute('role') === 'button') {
-            return true;
-          }
+          if ((el.tagName || '').toLowerCase() === 'button') return true;
           const hasClickableChild = clickables.some(child => child !== el && el.contains(child));
           return !hasClickableChild;
         });
@@ -709,30 +692,7 @@ class CdpClient extends EventEmitter {
 
       function getElementCoords(el) {
         const rect = el.getBoundingClientRect();
-        let x = rect.left + rect.width / 2;
-        let y = rect.top + rect.height / 2;
-        
-        let currentWindow = el.ownerDocument.defaultView;
-        while (currentWindow !== window) {
-          const parentDoc = currentWindow.parent.document;
-          const iframes = parentDoc.querySelectorAll('iframe');
-          let frameEl = null;
-          for (const iframe of iframes) {
-            if (iframe.contentWindow === currentWindow) {
-              frameEl = iframe;
-              break;
-            }
-          }
-          if (frameEl) {
-            const frameRect = frameEl.getBoundingClientRect();
-            x += frameRect.left;
-            y += frameRect.top;
-            currentWindow = currentWindow.parent;
-          } else {
-            break;
-          }
-        }
-        return { x, y, width: rect.width, height: rect.height };
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height };
       }
 
       const buttons = findAllClickables().reverse();
@@ -743,32 +703,39 @@ class CdpClient extends EventEmitter {
         const normalizedText = text.replace(/[^a-z0-9ㄱ-ㅎㅏ-ㅣ가-힣]/g, '');
         const query = ${JSON.stringify(buttonText)}.toLowerCase();
         
+
         let isMatch = false;
         if (text === query || text.includes(query) || query.includes(text)) {
-          isMatch = true;
+          if (text.length > 1 || text === query) isMatch = true;
         } else if (targetQuery && normalizedText.includes(targetQuery)) {
           isMatch = true;
-        } else if (normalizedText && targetQuery.includes(normalizedText)) {
+        } else if (normalizedText && targetQuery.includes(normalizedText) && normalizedText.length > 2) {
           isMatch = true;
         }
+
         
         if (isMatch) {
-          // 1. Scroll the button into center of viewport to ensure coordinate clicks fall inside the viewport
-          try {
-            btn.scrollIntoView({ block: 'center', inline: 'center' });
-          } catch (scrollErr) {}
-
+          try { btn.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
           const coords = getElementCoords(btn);
           
-          // 2. Dispatch MouseEvents and click() on the element itself.
-          // Event bubbling (bubbles: true) will naturally propagate to React handlers without touching dangerous parent backdrops.
+
+          try {
+            if (btn.tagName && btn.tagName.toLowerCase() === 'label') {
+              const input = btn.querySelector('input[type="radio"], input[type="checkbox"]');
+              if (input) {
+                input.checked = true;
+                input.dispatchEvent(new Event('change', {bubbles: true}));
+              }
+            } else if (btn.tagName && btn.tagName.toLowerCase() === 'input' && (btn.type === 'radio' || btn.type === 'checkbox')) {
+              btn.checked = true;
+              btn.dispatchEvent(new Event('change', {bubbles: true}));
+            }
+          } catch(e) {}
+          
           try {
             btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, buttons: 1 }));
             btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
             btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-          } catch (e) {}
-          
-          try {
             btn.click();
           } catch (e) {}
           
@@ -778,42 +745,31 @@ class CdpClient extends EventEmitter {
       return { ok: false, error: 'Button not found: ' + ${JSON.stringify(buttonText)} };
     })()`);
 
-    if (!findResult?.ok) {
-      return findResult;
-    }
+    if (!findResult?.ok) return findResult;
 
     if (findResult.hasCoords && findResult.coords) {
       const { x, y } = findResult.coords;
       console.log(`  [cdp] Simulating trusted click at (${x.toFixed(1)}, ${y.toFixed(1)}) for "${buttonText}"`);
       try {
-        await this.call('Input.dispatchMouseEvent', {
-          type: 'mouseMoved',
-          x, y,
-        });
-        await new Promise((r) => setTimeout(r, 50));
-        
+        // TELEPORT mouse to avoid hover bug (no mouseMoved)
         await this.call('Input.dispatchMouseEvent', {
           type: 'mousePressed',
           x, y,
           button: 'left',
           clickCount: 1,
         });
-        await new Promise((r) => setTimeout(r, 50));
-
+        await new Promise(r => setTimeout(r, 50));
         await this.call('Input.dispatchMouseEvent', {
           type: 'mouseReleased',
           x, y,
           button: 'left',
           clickCount: 1,
         });
-        
         return { ok: true, method: 'hybrid_mouse' };
       } catch (err) {
-        console.warn(`  [cdp] CDP mouse click failed, fell back to JS/DOM events: ${err.message}`);
         return { ok: true, method: 'js_events', warning: err.message };
       }
     }
-
     return { ok: true, method: 'js_events' };
   }
 

@@ -22,6 +22,57 @@ console.log(`
   ╚══════════════════════════════════╝
 `);
 
+const sendApprovalKeyboard = async (targetChatId, targetMessageId = null, headerText = '') => {
+  const optionButtons = approvalOptions.map((text, idx) => ({
+    text: `${idx === selectedOptionIdx ? '🔘' : '⚪️'} ${text}`,
+    data: `select:${idx}`
+  }));
+
+  const actionButtons = approvalActions.map(text => ({
+    text: text.toLowerCase().includes('skip') || text.toLowerCase().includes('cancel') || text.toLowerCase().includes('reject') ? `❌ ${text}` : `✅ ${text}`,
+    data: `action:${text}`
+  }));
+
+  const keyboard = {
+    inline_keyboard: [
+      ...optionButtons.map(b => [{ text: b.text, callback_data: b.data }]),
+      actionButtons.map(b => ({ text: b.text, callback_data: b.data }))
+    ]
+  };
+
+  console.log(`  [bot] sendApprovalKeyboard: targetMessageId=${targetMessageId}, selectedOptionIdx=${selectedOptionIdx}`);
+  console.log(`  [bot] sendApprovalKeyboard buttons:`, JSON.stringify(keyboard.inline_keyboard));
+
+  const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  let text = '⚠️ <b>Antigravity에서 권한 승인을 요청합니다.</b>\n옵션을 선택한 후 실행해 주세요.';
+  if (headerText) {
+    text = `⚠️ <b>권한 승인 요청 감지</b>\n\n💬 <b>요청 내용</b>:\n<code>${esc(headerText)}</code>\n\n옵션을 선택한 후 실행해 주세요.`;
+  }
+
+  if (targetMessageId) {
+    await tg.api('editMessageText', {
+      chat_id: targetChatId,
+      message_id: targetMessageId,
+      text,
+      parse_mode: 'HTML',
+      reply_markup: keyboard
+    }).catch((err) => {
+      console.error('  [index] ❌ editMessageText error:', err.message);
+    });
+  } else {
+    const sent = await tg.api('sendMessage', {
+      chat_id: targetChatId,
+      text,
+      parse_mode: 'HTML',
+      reply_markup: keyboard
+    });
+    activeApprovalMsgId = sent.message_id;
+    if (approvalOptions && approvalOptions.length > 0) {
+      lastSelectedOption = approvalOptions[selectedOptionIdx];
+    }
+  }
+};
+
 async function main() {
   // Test CDP connection
   try {
@@ -37,6 +88,93 @@ async function main() {
   } catch (err) {
     console.warn(`⚠️  CDP not available yet: ${err.message}`);
   }
+
+  // ⚡ Global reactive spontaneous approval listener!
+  cdp.on('approval_event', async (payload) => {
+    try {
+      const chatId = config.allowedUserId;
+      if (payload.event === 'approval_opened') {
+        const buttonTexts = payload.buttons;
+        const headerText = payload.header || '';
+        const approvalKey = buttonTexts.join(',') + '|' + headerText;
+
+        if (approvalKey === monitor.lastSettledApprovalKey) {
+          return;
+        }
+        if (approvalKey === monitor.lastApprovalKey && activeApprovalMsgId) {
+          return; // Already sent
+        }
+
+        console.log(`  [approval] Global approval request captured: ${buttonTexts.join(', ')}`);
+        activeApprovalHeader = headerText || '';
+
+        const optionKeywords = ['yes, allow this time', 'yes', 'no', 'allow this time', 'deny', 'allow once', '승인', '허용', '거절', '허가'];
+        const actionKeywords = ['submit', 'run', 'skip', 'cancel', 'reject', 'close', '확인', '실행'];
+        
+        approvalOptions = buttonTexts.filter(text => {
+          const lower = text.toLowerCase();
+          return optionKeywords.some(kw => lower.includes(kw)) && !actionKeywords.some(kw => lower.includes(kw));
+        });
+        
+        approvalActions = buttonTexts.filter(text => {
+          const lower = text.toLowerCase();
+          return actionKeywords.some(kw => lower.includes(kw));
+        });
+
+        // Fallbacks
+        if (approvalOptions.length === 0) approvalOptions = buttonTexts.slice(0, 1);
+        if (approvalActions.length === 0) approvalActions = buttonTexts.slice(1);
+
+        selectedOptionIdx = 0;
+        monitor.lastApprovalKey = approvalKey;
+        monitor.approvalActive = true;
+
+        // Clean up previous spontaneous visual message if any
+        if (activeApprovalMsgId) {
+          await tg.deleteMessage(chatId, activeApprovalMsgId).catch(() => {});
+        }
+
+        await sendApprovalKeyboard(chatId, null, activeApprovalHeader);
+      } else if (payload.event === 'approval_resolved') {
+        if (monitor.approvalActive) {
+          console.log(`  [approval] Global approval resolved/closed.`);
+          monitor.approvalActive = false;
+          
+          if (activeApprovalMsgId) {
+            let updateText = '';
+            if (lastSelectedAction) {
+              const isSkipOrCancel = lastSelectedAction.toLowerCase().includes('skip') || 
+                                     lastSelectedAction.toLowerCase().includes('cancel') || 
+                                     lastSelectedAction.toLowerCase().includes('reject');
+              if (isSkipOrCancel) {
+                updateText = `❌ 거절/건너뜀 완료: ${lastSelectedAction}`;
+              } else {
+                updateText = `✅ 최종 승인 완료: ${lastSelectedOption || 'Yes, allow this time'} (${lastSelectedAction})`;
+              }
+            } else {
+              updateText = `✅ Antigravity 브라우저에서 승인 창이 닫혔거나 직접 처리되었습니다.`;
+            }
+
+            await tg.api('editMessageText', {
+              chat_id: chatId,
+              message_id: activeApprovalMsgId,
+              text: updateText,
+              reply_markup: { inline_keyboard: [] }
+            }).catch((err) => {
+              console.warn(`  [approval_resolved] editMessageText warn: ${err.message}`);
+            });
+            activeApprovalMsgId = null;
+            lastSelectedOption = '';
+            lastSelectedAction = '';
+          }
+        }
+        monitor.lastApprovalKey = '';
+        monitor.lastSettledApprovalKey = '';
+      }
+    } catch (err) {
+      console.error('❌ Error in global approval handler:', err);
+    }
+  });
 
   // ── Text message handler ──
   tg.onText(async (msg) => {
@@ -309,88 +447,6 @@ async function main() {
         }
       };
 
-      const sendApprovalKeyboard = async (targetChatId, targetMessageId = null, headerText = '') => {
-        const optionButtons = approvalOptions.map((text, idx) => ({
-          text: `${idx === selectedOptionIdx ? '🔘' : '⚪️'} ${text}`,
-          data: `select:${idx}`
-        }));
-
-        const actionButtons = approvalActions.map(text => ({
-          text: text.toLowerCase().includes('skip') || text.toLowerCase().includes('cancel') || text.toLowerCase().includes('reject') ? `❌ ${text}` : `✅ ${text}`,
-          data: `action:${text}`
-        }));
-
-        const keyboard = {
-          inline_keyboard: [
-            optionButtons.map(b => ({ text: b.text, callback_data: b.data })),
-            actionButtons.map(b => ({ text: b.text, callback_data: b.data }))
-          ]
-        };
-
-        let text = '⚠️ Antigravity에서 권한 승인을 요청합니다. 옵션을 선택한 후 실행해 주세요.';
-        if (headerText) {
-          text = `⚠️ **권한 승인 요청 감지**\n\n💬 **요청 내용**:\n\`\`\`\n${headerText}\n\`\`\`\n옵션을 선택한 후 실행해 주세요.`;
-        }
-
-        if (targetMessageId) {
-          await tg.api('editMessageText', {
-            chat_id: targetChatId,
-            message_id: targetMessageId,
-            text,
-            parse_mode: 'Markdown',
-            reply_markup: keyboard
-          }).catch(() => {});
-        } else {
-          const sent = await tg.api('sendMessage', {
-            chat_id: targetChatId,
-            text,
-            parse_mode: 'Markdown',
-            reply_markup: keyboard
-          });
-          activeApprovalMsgId = sent.message_id;
-          if (approvalOptions && approvalOptions.length > 0) {
-            lastSelectedOption = approvalOptions[selectedOptionIdx];
-          }
-        }
-      };
-
-      const onApproval = async (buttonTexts, headerText) => {
-        try {
-          console.log(`  [approval] Received approval request with buttons: ${buttonTexts.join(', ')} (Header: ${headerText})`);
-          activeApprovalHeader = headerText || '';
-
-          // ⚡ 무인 자율 자동 승인 (Auto-Approval Bypass) - 비활성화됨 (사용자가 직접 수동 승인하도록 텔레그램으로 항상 전달)
-          
-          const optionKeywords = ['yes, allow this time', 'yes', 'no', 'allow this time', 'deny', 'allow once', '승인', '허용', '거절', '허가'];
-          const actionKeywords = ['submit', 'run', 'skip', 'cancel', 'reject', 'close', '확인', '실행'];
-          
-          approvalOptions = buttonTexts.filter(text => {
-            const lower = text.toLowerCase();
-            return optionKeywords.some(kw => lower.includes(kw)) && !actionKeywords.some(kw => lower.includes(kw));
-          });
-          
-          approvalActions = buttonTexts.filter(text => {
-            const lower = text.toLowerCase();
-            return actionKeywords.some(kw => lower.includes(kw));
-          });
-
-          // Fallbacks in case classification is empty
-          if (approvalOptions.length === 0) {
-            approvalOptions = buttonTexts.slice(0, 1);
-          }
-          if (approvalActions.length === 0) {
-            approvalActions = buttonTexts.slice(1);
-          }
-
-          selectedOptionIdx = 0; // Default to first option selected
-
-          console.log(`  [approval] Sending stateful keyboard (options: ${approvalOptions.join(', ')} / actions: ${approvalActions.join(', ')})`);
-          await sendApprovalKeyboard(chatId, null, activeApprovalHeader);
-        } catch (err) {
-          console.error('❌ Error in onApproval handler:', err);
-        }
-      };
-
       const onComplete = async ({ html, text: responseText, elapsed }) => {
         try {
           cleanup();
@@ -401,7 +457,12 @@ async function main() {
           await tg.deleteMessage(chatId, statusMsg.message_id);
 
           for (const chunk of chunks) {
-            await tg.sendMessage(chatId, chunk);
+            try {
+              await tg.sendMessage(chatId, chunk, { parse_mode: 'Markdown' });
+            } catch (err) {
+              console.warn('⚠️ Markdown rendering failed, falling back to plain text:', err.message);
+              await tg.sendMessage(chatId, chunk);
+            }
           }
           if (chunks.length > 0) {
             await tg.sendMessage(chatId, `⏱️ ${elapsed}s`);
@@ -412,66 +473,20 @@ async function main() {
         }
       };
 
-      const onApprovalResolved = async () => {
-        try {
-          console.log(`  [approval_resolved] Modal closed on IDE. Updating Telegram message (msgId: ${activeApprovalMsgId})...`);
-          if (activeApprovalMsgId) {
-            let updateText = '';
-            if (lastSelectedAction) {
-              const isSkipOrCancel = lastSelectedAction.toLowerCase().includes('skip') || 
-                                     lastSelectedAction.toLowerCase().includes('cancel') || 
-                                     lastSelectedAction.toLowerCase().includes('reject');
-              if (isSkipOrCancel) {
-                updateText = `❌ 거절/건너뜀 완료: ${lastSelectedAction}`;
-              } else {
-                updateText = `✅ 최종 승인 완료: ${lastSelectedOption || 'Yes, allow this time'} (${lastSelectedAction})`;
-              }
-            } else {
-              updateText = `✅ Antigravity 브라우저에서 승인 창이 닫혔거나 직접 처리되었습니다.`;
-            }
-
-            await tg.api('editMessageText', {
-              chat_id: chatId,
-              message_id: activeApprovalMsgId,
-              text: updateText,
-              reply_markup: { inline_keyboard: [] }
-            }).catch((err) => {
-              console.warn(`  [approval_resolved] editMessageText warn: ${err.message}`);
-            });
-            
-            // 상태 초기화
-            activeApprovalMsgId = null;
-            lastSelectedOption = '';
-            lastSelectedAction = '';
-          }
-        } catch (err) {
-          console.error('❌ Error in onApprovalResolved handler:', err);
-        }
-      };
-
       const cleanup = () => {
         monitor.off('phase', onPhase);
         monitor.off('progress', onProgress);
-        monitor.off('approval', onApproval);
-        monitor.off('approval_resolved', onApprovalResolved);
         monitor.off('complete', onComplete);
-        activeApprovalMsgId = null;
-        lastSelectedOption = '';
-        lastSelectedAction = '';
       };
 
       // Prevent listener duplication leak by removing all legacy listeners before registering new ones!
       monitor.removeAllListeners('phase');
       monitor.removeAllListeners('progress');
-      monitor.removeAllListeners('approval');
-      monitor.removeAllListeners('approval_resolved');
       monitor.removeAllListeners('complete');
 
       // Register listeners BEFORE starting monitor
       monitor.on('phase', onPhase);
       monitor.on('progress', onProgress);
-      monitor.on('approval', onApproval);
-      monitor.on('approval_resolved', onApprovalResolved);
       monitor.on('complete', onComplete);
 
       // Start monitoring (async, fires events)

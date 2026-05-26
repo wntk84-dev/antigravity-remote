@@ -114,11 +114,28 @@ function createBot() {
       };
 
       // Approval request
-      const onApproval = async () => {
-        const keyboard = new InlineKeyboard()
-          .text('✅ Allow', 'approve_allow')
-          .text('❌ Deny', 'approve_deny');
-        await ctx.reply('⚠️ Antigravity is requesting approval', { reply_markup: keyboard });
+      const onApproval = async (approvalInfo, headerText, contentText) => {
+        const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const parts = (headerText || '').split('\n\n');
+        const title = parts.shift() || '⚠️ Permission Request';
+        const code = parts.join('\n\n');
+
+        let msgText = `<b>${esc(title)}</b>\n`;
+        if (code) {
+          msgText += `\n<code>${esc(code)}</code>\n`;
+        }
+
+        const keyboard = new InlineKeyboard();
+        if (approvalInfo && approvalInfo.length > 0) {
+          approvalInfo.forEach(btnText => {
+            const data = 'btn:' + btnText.substring(0, 50);
+            keyboard.text(btnText, data).row();
+          });
+        } else {
+          keyboard.text('✅ Allow', 'btn:Allow').text('❌ Deny', 'btn:Deny');
+        }
+
+        await ctx.reply(msgText, { parse_mode: 'HTML', reply_markup: keyboard });
       };
 
       // Completion
@@ -135,7 +152,7 @@ function createBot() {
         (async () => {
           for (const chunk of chunks) {
             try {
-              await ctx.reply(chunk);
+              await ctx.reply(chunk, { parse_mode: 'Markdown' });
             } catch {
               // If formatting fails, send as plain text
               await ctx.reply(chunk, { parse_mode: undefined });
@@ -180,6 +197,25 @@ function createBot() {
   });
 
   // ── Approval button callbacks ──
+  bot.callbackQuery(/^btn:(.+)$/, async (ctx) => {
+    const btnText = ctx.match[1];
+    try {
+      await cdp.clickButton(btnText);
+      await ctx.answerCallbackQuery({ text: `✅ Clicked: ${btnText}` });
+      
+      const lower = btnText.toLowerCase();
+      if (lower.includes('submit') || lower === 'skip' || lower === 'allow' || lower === 'deny') {
+         await ctx.editMessageText(`✅ Action completed: ${btnText}`);
+      } else {
+         await new Promise(r => setTimeout(r, 200));
+         await cdp.clickButton('Submit');
+         await ctx.editMessageText(`✅ Action completed: ${btnText} & Submit`);
+      }
+    } catch (err) {
+      await ctx.answerCallbackQuery({ text: `❌ ${err.message}` });
+    }
+  });
+
   bot.callbackQuery('approve_allow', async (ctx) => {
     try {
       await cdp.clickButton('Allow');
