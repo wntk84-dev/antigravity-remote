@@ -17,6 +17,7 @@ class ResponseMonitor extends EventEmitter {
     this.responseStarted = false;
     this.lastSettledApprovalKey = '';
     this.approvalActive = false;
+    this.boundApprovalHandler = this._handleApprovalEvent.bind(this);
   }
 
   /** Start monitoring for a response */
@@ -42,47 +43,49 @@ class ResponseMonitor extends EventEmitter {
     this._init();
   }
 
+  _handleApprovalEvent(payload) {
+    if (!this.polling) return;
+
+    if (payload.event === 'approval_opened') {
+      const approvalInfo = payload.buttons;
+      const headerText = payload.header || '';
+      const approvalKey = approvalInfo.join(',') + '|' + headerText;
+
+      if (approvalKey === this.lastSettledApprovalKey) {
+        // Already handled/submitted
+      } else if (approvalKey !== this.lastApprovalKey) {
+        const contentText = payload.content || '';
+        const diag = payload.diag || {};
+        console.log(`  [monitor] ⚠️  (Reactive) Approval requested: ${approvalInfo.join(', ')} (Header: ${headerText}) (Content: ${contentText})`);
+        if (diag.elTag) {
+          console.log(`  [monitor] 📊 Diag: el=${diag.elTag}.${diag.elClass || ''} textLen=${diag.elTextLen} rect=${JSON.stringify(diag.elRect)} nearbyBtns=${diag.nearbyBtnCount}`);
+        }
+        if (payload.htmlDumps) {
+          console.log('  [monitor] 📄 HTML Dumps:');
+          for (const [btnText, html] of Object.entries(payload.htmlDumps)) {
+            console.log(`    - [${btnText}]: ${html}`);
+          }
+        }
+        this.lastApprovalKey = approvalKey;
+        this.approvalActive = true;
+        this.emit('approval', approvalInfo, headerText, contentText);
+      }
+    } else if (payload.event === 'approval_resolved') {
+      if (this.approvalActive) {
+        console.log(`  [monitor] ℹ️  (Reactive) Approval dialog closed/resolved.`);
+        this.approvalActive = false;
+        this.emit('approval_resolved');
+      }
+      this.lastApprovalKey = '';
+      this.lastSettledApprovalKey = '';
+    }
+  }
+
   async _init() {
     try {
       await cdp.initApprovalBinding();
-      cdp.removeAllListeners('approval_event');
-      cdp.on('approval_event', (payload) => {
-        if (!this.polling) return;
-
-        if (payload.event === 'approval_opened') {
-          const approvalInfo = payload.buttons;
-          const headerText = payload.header || '';
-          const approvalKey = approvalInfo.join(',') + '|' + headerText;
-
-          if (approvalKey === this.lastSettledApprovalKey) {
-            // Already handled/submitted
-          } else if (approvalKey !== this.lastApprovalKey) {
-            const contentText = payload.content || '';
-            const diag = payload.diag || {};
-            console.log(`  [monitor] ⚠️  (Reactive) Approval requested: ${approvalInfo.join(', ')} (Header: ${headerText}) (Content: ${contentText})`);
-            if (diag.elTag) {
-              console.log(`  [monitor] 📊 Diag: el=${diag.elTag}.${diag.elClass || ''} textLen=${diag.elTextLen} rect=${JSON.stringify(diag.elRect)} nearbyBtns=${diag.nearbyBtnCount}`);
-            }
-            if (payload.htmlDumps) {
-              console.log('  [monitor] 📄 HTML Dumps:');
-              for (const [btnText, html] of Object.entries(payload.htmlDumps)) {
-                console.log(`    - [${btnText}]: ${html}`);
-              }
-            }
-            this.lastApprovalKey = approvalKey;
-            this.approvalActive = true;
-            this.emit('approval', approvalInfo, headerText, contentText);
-          }
-        } else if (payload.event === 'approval_resolved') {
-          if (this.approvalActive) {
-            console.log(`  [monitor] ℹ️  (Reactive) Approval dialog closed/resolved.`);
-            this.approvalActive = false;
-            this.emit('approval_resolved');
-          }
-          this.lastApprovalKey = '';
-          this.lastSettledApprovalKey = '';
-        }
-      });
+      cdp.off('approval_event', this.boundApprovalHandler);
+      cdp.on('approval_event', this.boundApprovalHandler);
     } catch (err) {
       console.error('  [monitor] ❌ Failed to initialize reactive approval binding:', err.message);
     }
