@@ -190,9 +190,133 @@ async function main() {
         '📸 /screenshot - 화면 캡처\n' +
         '📊 /status - 연결 상태\n' +
         '🛑 /stop - 생성 중단\n' +
-        '🆕 /new - 새 대화 세션 생성',
+        '🆕 /new - 새 대화 세션 생성\n' +
+        '🔄 /sync - 뮤타젠 동기화 세션 제어\n' +
+        '🐙 /git - Git 상태 조회 및 자동 커밋',
         { parse_mode: 'Markdown' }
       );
+    }
+
+    if (text === '/sync' || text === '/mutagen') {
+      const { exec } = require('child_process');
+      return exec('mutagen sync list', (err, stdout, stderr) => {
+        if (err) {
+          return tg.sendMessage(chatId, `❌ Mutagen sync list 조회 실패: ${err.message}`);
+        }
+        
+        // Parse Mutagen Output
+        const sessions = [];
+        const blocks = stdout.split('--------------------------------------------------------------------------------');
+        
+        blocks.forEach(block => {
+          if (!block.trim()) return;
+          
+          const idMatch = block.match(/Identifier:\s*(.+)/);
+          const nameMatch = block.match(/Name:\s*(.+)/);
+          const statusMatch = block.match(/Status:\s*\[?([a-zA-Z]+)\]?/);
+          const alphaMatch = block.match(/Alpha:\s*\n\s*URL:\s*(.+)/);
+          const betaMatch = block.match(/Beta:\s*\n\s*URL:\s*(.+)/);
+          
+          if (idMatch) {
+            sessions.push({
+              id: idMatch[1].trim(),
+              name: nameMatch ? nameMatch[1].trim() : '이름없음',
+              status: statusMatch ? statusMatch[1].trim() : 'Unknown',
+              alpha: alphaMatch ? alphaMatch[1].trim() : 'Unknown',
+              beta: betaMatch ? betaMatch[1].trim() : 'Unknown'
+            });
+          }
+        });
+        
+        if (sessions.length === 0) {
+          return tg.sendMessage(chatId, '📂 **Mutagen 동기화 세션**\n\n등록된 동기화 세션이 없습니다.');
+        }
+        
+        let responseText = '📂 **Mutagen 동기화 세션 현황**\n\n';
+        const buttons = [];
+        
+        sessions.forEach((s, idx) => {
+          const isPaused = s.status.toLowerCase().includes('paused');
+          const statusEmoji = isPaused ? '⏸️' : '▶️';
+          
+          responseText += `🔹 **세션 ${idx + 1}: ${s.name}**\n` +
+                          ` • ID: \`${s.id.substring(0, 8)}...\`\n` +
+                          ` • 상태: ${statusEmoji} **${s.status}**\n` +
+                          ` • Alpha: \`${s.alpha.split('/').pop()}\`\n` +
+                          ` • Beta: \`${s.beta.includes(':') ? s.beta.split(':').pop() : s.beta}\`\n\n`;
+                          
+          const btnLabel = isPaused ? `▶️ Resume: ${s.name}` : `⏸️ Pause: ${s.name}`;
+          const btnAction = isPaused ? `resume` : `pause`;
+          const target = s.name === '이름없음' ? s.id : s.name;
+          
+          buttons.push({
+            text: btnLabel,
+            data: `mutagen:${btnAction}:${target}`
+          });
+        });
+        
+        // Add All Resume/Pause buttons
+        const hasPaused = sessions.some(s => s.status.toLowerCase().includes('paused'));
+        const allBtn = hasPaused ? 
+          { text: '▶️ Resume All Sessions', data: 'mutagen:resume_all' } : 
+          { text: '⏸️ Pause All Sessions', data: 'mutagen:pause_all' };
+          
+        const keyboard = {
+          inline_keyboard: [
+            ...buttons.map(b => [{ text: b.text, callback_data: b.data }]),
+            [{ text: allBtn.text, callback_data: allBtn.data }]
+          ]
+        };
+        
+        return tg.api('sendMessage', {
+          chat_id: chatId,
+          text: responseText,
+          parse_mode: 'Markdown',
+          reply_markup: keyboard
+        });
+      });
+    }
+
+    if (text === '/git') {
+      const { exec } = require('child_process');
+      return exec('git status -s && git log -n 1 --oneline', (err, stdout, stderr) => {
+        if (err) {
+          return tg.sendMessage(chatId, `❌ Git status 조회 실패: ${err.message}`);
+        }
+        
+        const lines = stdout.trim().split('\n');
+        const latestCommit = lines.length > 0 ? lines.pop() : 'No commit found';
+        const changedFiles = lines.filter(l => l.trim() !== '');
+        
+        let responseText = '🐙 **Git Repository 상태 요약**\n\n';
+        responseText += `📌 **최신 커밋**: \`${latestCommit}\`\n\n`;
+        
+        if (changedFiles.length === 0) {
+          responseText += '✅ **깨끗한 워크스페이스**: 변경된 파일이 없습니다.';
+        } else {
+          responseText += `⚠️ **수정된 파일 (${changedFiles.length}개)**:\n`;
+          changedFiles.slice(0, 15).forEach(f => {
+            responseText += ` • \`${f}\`\n`;
+          });
+          if (changedFiles.length > 15) {
+            responseText += ` • 외 ${changedFiles.length - 15}개의 파일이 더 있습니다.\n`;
+          }
+        }
+        
+        const keyboard = {
+          inline_keyboard: [
+            [{ text: '🔍 상세 Git Status 조회', callback_data: 'git:status_full' }],
+            [{ text: '📦 git add . & commit (Auto)', callback_data: 'git:commit_auto' }]
+          ]
+        };
+        
+        return tg.api('sendMessage', {
+          chat_id: chatId,
+          text: responseText,
+          parse_mode: 'Markdown',
+          reply_markup: keyboard
+        });
+      });
     }
 
     if (text === '/project') {
@@ -514,6 +638,135 @@ async function main() {
   // ── Callback query handler ──
   tg.onCallback(async (query) => {
     try {
+      // ── Mutagen Callback Commands ──
+      if (query.data.startsWith('mutagen:')) {
+        const parts = query.data.split(':');
+        const action = parts[1];
+        const target = parts[2];
+        const { exec } = require('child_process');
+        
+        let cmd = '';
+        if (action === 'resume_all') {
+          cmd = 'mutagen sync resume --all';
+          await tg.answerCallback(query.id, '▶️ 모든 세션 재개 중...');
+        } else if (action === 'pause_all') {
+          cmd = 'mutagen sync pause --all';
+          await tg.answerCallback(query.id, '⏸️ 모든 세션 일시정지 중...');
+        } else if (action === 'resume') {
+          cmd = `mutagen sync resume ${target}`;
+          await tg.answerCallback(query.id, `▶️ ${target} 세션 재개 중...`);
+        } else if (action === 'pause') {
+          cmd = `mutagen sync pause ${target}`;
+          await tg.answerCallback(query.id, `⏸️ ${target} 세션 일시정지 중...`);
+        }
+        
+        console.log(`  [bot] Executing Mutagen control: "${cmd}"`);
+        
+        return exec(cmd, (err, stdout, stderr) => {
+          if (err) {
+            return tg.sendMessage(query.message.chat.id, `❌ Mutagen 제어 실패: ${err.message}`);
+          }
+          
+          // Refresh Mutagen status card
+          return exec('mutagen sync list', async (listErr, listStdout) => {
+            if (listErr) {
+              return tg.sendMessage(query.message.chat.id, `✅ 명령은 실행되었으나 상태 갱신 실패: ${listErr.message}`);
+            }
+            
+            const sessions = [];
+            const blocks = listStdout.split('--------------------------------------------------------------------------------');
+            blocks.forEach(block => {
+              if (!block.trim()) return;
+              const idMatch = block.match(/Identifier:\s*(.+)/);
+              const nameMatch = block.match(/Name:\s*(.+)/);
+              const statusMatch = block.match(/Status:\s*\[?([a-zA-Z]+)\]?/);
+              const alphaMatch = block.match(/Alpha:\s*\n\s*URL:\s*(.+)/);
+              const betaMatch = block.match(/Beta:\s*\n\s*URL:\s*(.+)/);
+              if (idMatch) {
+                sessions.push({
+                  id: idMatch[1].trim(),
+                  name: nameMatch ? nameMatch[1].trim() : '이름없음',
+                  status: statusMatch ? statusMatch[1].trim() : 'Unknown',
+                  alpha: alphaMatch ? alphaMatch[1].trim() : 'Unknown',
+                  beta: betaMatch ? betaMatch[1].trim() : 'Unknown'
+                });
+              }
+            });
+            
+            let responseText = `✅ **Mutagen 동기화 상태 변경 완료**\n\n`;
+            const buttons = [];
+            
+            sessions.forEach((s, idx) => {
+              const isPaused = s.status.toLowerCase().includes('paused');
+              const statusEmoji = isPaused ? '⏸️' : '▶️';
+              
+              responseText += `🔹 **세션 ${idx + 1}: ${s.name}**\n` +
+                              ` • ID: \`${s.id.substring(0, 8)}...\`\n` +
+                              ` • 상태: ${statusEmoji} **${s.status}**\n` +
+                              ` • Alpha: \`${s.alpha.split('/').pop()}\`\n` +
+                              ` • Beta: \`${s.beta.includes(':') ? s.beta.split(':').pop() : s.beta}\`\n\n`;
+                              
+              const btnLabel = isPaused ? `▶️ Resume: ${s.name}` : `⏸️ Pause: ${s.name}`;
+              const btnAction = isPaused ? `resume` : `pause`;
+              const targetSession = s.name === '이름없음' ? s.id : s.name;
+              
+              buttons.push({
+                text: btnLabel,
+                data: `mutagen:${btnAction}:${targetSession}`
+              });
+            });
+            
+            const hasPaused = sessions.some(s => s.status.toLowerCase().includes('paused'));
+            const allBtn = hasPaused ? 
+              { text: '▶️ Resume All Sessions', data: 'mutagen:resume_all' } : 
+              { text: '⏸️ Pause All Sessions', data: 'mutagen:pause_all' };
+              
+            const keyboard = {
+              inline_keyboard: [
+                ...buttons.map(b => [{ text: b.text, callback_data: b.data }]),
+                [{ text: allBtn.text, callback_data: allBtn.data }]
+              ]
+            };
+            
+            await tg.api('editMessageText', {
+              chat_id: query.message.chat.id,
+              message_id: query.message.message_id,
+              text: responseText,
+              parse_mode: 'Markdown',
+              reply_markup: keyboard
+            }).catch(() => {});
+          });
+        });
+      }
+
+      // ── Git Callback Commands ──
+      if (query.data.startsWith('git:')) {
+        const action = query.data.substring('git:'.length);
+        const { exec } = require('child_process');
+        
+        if (action === 'status_full') {
+          await tg.answerCallback(query.id, '🔍 Git Status 상세 조회 중...');
+          return exec('git status', (err, stdout) => {
+            if (err) return tg.sendMessage(query.message.chat.id, `❌ Git Status 상세 조회 실패: ${err.message}`);
+            return tg.sendMessage(query.message.chat.id, `🐙 **Git Status 상세 결과**:\n\n\`\`\`\n${stdout.substring(0, 3000)}\n\`\`\``, { parse_mode: 'Markdown' });
+          });
+        }
+        
+        if (action === 'commit_auto') {
+          await tg.answerCallback(query.id, '📦 자동 커밋 및 푸시 중...');
+          const commitMsg = `wip: auto-committed via Antigravity Remote at ${new Date().toLocaleTimeString()}`;
+          const cmd = `git add . && git commit -m "${commitMsg}" && git push`;
+          console.log(`  [bot] Executing auto git commit/push: "${cmd}"`);
+          
+          return exec(cmd, (err, stdout, stderr) => {
+            if (err) {
+              return tg.sendMessage(query.message.chat.id, `❌ 자동 커밋/푸시 실패: ${err.message}\n${stderr}`);
+            }
+            return tg.sendMessage(query.message.chat.id, `✅ **자동 커밋 & 푸시 완료!**\n\n\`\`\`\n${stdout.substring(0, 1000)}\n\`\`\``, { parse_mode: 'Markdown' });
+          });
+        }
+      }
+
       if (query.data.startsWith('selectproject:')) {
         const idx = parseInt(query.data.substring('selectproject:'.length), 10);
         const convos = global.lastCdpConversationsList || [];
