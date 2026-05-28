@@ -15,6 +15,9 @@ let activeApprovalHeader = '';
 let selectedProjectUrl = null;
 let selectedProjectTitle = null;
 
+let messageQueue = [];
+let isProcessingQueue = false;
+
 console.log(`
   ╔══════════════════════════════════╗
   ║   Antigravity Remote  v1.0.0    ║
@@ -518,16 +521,28 @@ async function main() {
       return tg.sendMessage(chatId, '⚠️ 작업할 프로젝트가 선택되지 않았습니다.\n\n먼저 `/project` 명령어를 사용하여 대화할 프로젝트를 선택해 주세요.', { parse_mode: 'Markdown' });
     }
 
-    // ── Send message to Antigravity ──
+    // ── Message Queue Check ──
+    const isBusy = monitor.phase === 'thinking' || monitor.phase === 'generating' || monitor.approvalActive;
+    if (isBusy) {
+      messageQueue.push({ text, chatId });
+      console.log(`  [queue] Agent is busy (${monitor.phase}). Queued message: "${text.substring(0, 30)}..." (Queue length: ${messageQueue.length})`);
+      return tg.sendMessage(chatId, `⏳ **에이전트가 연산 중입니다.**\n보내신 명령어는 대기열(Queue)에 안전하게 보관되었으며, 현재 작업이 완료되는 대로 순차 실행됩니다. (대기번호: ${messageQueue.length}번)`);
+    }
+
+    await injectCommandFlow(text, chatId);
+  });
+
+  // ── High-reliability command injection and monitoring engine ──
+  async function injectCommandFlow(text, chatId) {
     let statusMsg;
     try {
       console.log('  [1] Connecting to CDP...');
       await cdp.connect(selectedProjectUrl);
       console.log('  [2] Sending status to Telegram...');
       statusMsg = await tg.sendMessage(chatId, '⏳ Sending...');
-      console.log('  [3] Injecting message to Antigravity...');
+      console.log('  [3] Injecting message to Antigravity (high-reliability mode)...');
       await cdp.sendMessage(text);
-      console.log('  [4] Message sent! Updating status...');
+      console.log('  [4] Message sent and verified! Monitoring response...');
       const stopKeyboard = {
         inline_keyboard: [[{ text: '🛑 Stop Generation', callback_data: 'action:stop_generation' }]]
       };
@@ -592,6 +607,9 @@ async function main() {
             await tg.sendMessage(chatId, `⏱️ ${elapsed}s`);
           }
           console.log(`  [response] ✅ Sent to Telegram!`);
+          
+          // Trigger queue processing after current run completes successfully
+          setTimeout(() => processQueue(), 800);
         } catch (err) {
           console.error('❌ Error in onComplete handler:', err);
         }
@@ -603,7 +621,7 @@ async function main() {
         monitor.off('complete', onComplete);
       };
 
-      // Prevent listener duplication leak by removing all legacy listeners before registering new ones!
+      // Prevent listener duplication leak by removing all legacy listeners before registering new ones
       monitor.removeAllListeners('phase');
       monitor.removeAllListeners('progress');
       monitor.removeAllListeners('complete');
@@ -622,6 +640,9 @@ async function main() {
           cleanup();
           monitor.stop();
           tg.editMessage(chatId, statusMsg.message_id, '⏰ Timeout (5min)').catch(() => {});
+          
+          // Proceed queue even after timeout
+          setTimeout(() => processQueue(), 800);
         }
       }, 5 * 60 * 1000);
 
@@ -632,8 +653,31 @@ async function main() {
       } else {
         await tg.sendMessage(chatId, errMsg);
       }
+      
+      // Proceed queue even after injection failure
+      setTimeout(() => processQueue(), 800);
     }
-  });
+  }
+
+  // ── Queue Processing Engine ──
+  async function processQueue() {
+    if (isProcessingQueue || messageQueue.length === 0) return;
+    isProcessingQueue = true;
+    
+    const nextItem = messageQueue.shift();
+    console.log(`  [queue] Dequeueing next message: "${nextItem.text.substring(0, 30)}..." (Remaining: ${messageQueue.length})`);
+    
+    try {
+      await tg.sendMessage(nextItem.chatId, `🚀 **대기 중인 명령 실행 개시**\n\`${nextItem.text}\` 주입을 시작합니다...`, { parse_mode: 'Markdown' }).catch(() => {});
+      await injectCommandFlow(nextItem.text, nextItem.chatId);
+    } catch (err) {
+      console.error('  [queue] Failed to process queued message:', err.message);
+    } finally {
+      isProcessingQueue = false;
+      // Process next item in queue after a small delay
+      setTimeout(() => processQueue(), 1000);
+    }
+  }
 
   // ── Callback query handler ──
   tg.onCallback(async (query) => {

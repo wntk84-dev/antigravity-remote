@@ -138,48 +138,114 @@ class CdpClient extends EventEmitter {
     return result?.result?.value;
   }
 
-  /** Send a message to Antigravity chat */
+  /** Send a message to Antigravity chat with high-reliability verification and state sync */
   async sendMessage(text) {
     await this.connect();
 
-    // Step 1: Focus the input and clear existing content
-    const focusResult = await this.evaluate(`(() => {
-      const input = document.querySelector('${config.selectors.chatInput}');
-      if (!input) return { ok: false, error: 'Chat input not found' };
-      input.focus();
-      // Select all existing content so insertText replaces it
-      const sel = window.getSelection();
-      sel.selectAllChildren(input);
-      return { ok: true };
-    })()`);
+    const editorSelector = config.selectors.chatInput || 'div[role="combobox"][contenteditable="true"]';
+    
+    // Helper: pre-scan chat history to count current user messages (for verification)
+    const getInitialUserMsgCount = async () => {
+      return this.evaluate(`(() => {
+        const msgs = document.querySelectorAll('[aria-label="User message"], [data-turn-role="user"], [class*="user-message"]');
+        return msgs.length;
+      })()`).catch(() => 0);
+    };
 
-    if (!focusResult?.ok) throw new Error(focusResult?.error || 'Failed to focus chat input');
+    const initialCount = await getInitialUserMsgCount();
+    console.log(`  [cdp] Starting highly reliable send. Initial user message count: ${initialCount}`);
 
-    // Step 2: Use CDP Input.insertText (works with React/contenteditable)
-    await this.call('Input.insertText', { text });
+    const attemptSend = async () => {
+      // 1. Focus editor and clear selection safely
+      const focusResult = await this.evaluate(`(() => {
+        const input = document.querySelector('${editorSelector}');
+        if (!input) return { ok: false, error: 'Chat editor input not found' };
+        input.focus();
+        const sel = window.getSelection();
+        sel.selectAllChildren(input);
+        return { ok: true };
+      })()`);
 
-    // Step 3: Small delay then press Enter to submit
-    await new Promise((r) => setTimeout(r, 200));
+      if (!focusResult?.ok) throw new Error(focusResult?.error || 'Failed to focus editor');
 
-    await this.call('Input.dispatchKeyEvent', {
-      type: 'keyDown', key: 'Enter', code: 'Enter',
-      windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
-    });
-    await this.call('Input.dispatchKeyEvent', {
-      type: 'keyUp', key: 'Enter', code: 'Enter',
-      windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
-    });
+      // 2. Hybrid Injecting Text: Use execCommand('insertText') to perfectly preserve multiline/code structure and trigger React state updates!
+      const injectResult = await this.evaluate(`((textToInject) => {
+        try {
+          const input = document.querySelector('${editorSelector}');
+          if (!input) return false;
+          
+          // Clear current content
+          input.innerHTML = '';
+          
+          // Inject via standard browser editing command which preserves react bindings and carriage returns perfectly
+          document.execCommand('insertText', false, textToInject);
+          
+          // Dispatch DOM input events to force React virtual DOM synchronization
+          input.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          
+          return true;
+        } catch (e) {
+          return false;
+        }
+      })(${JSON.stringify(text)})`);
 
-    // Step 4: Fallback Send Button click to guarantee submission
-    await new Promise((r) => setTimeout(r, 100));
-    await this.evaluate(`(() => {
-      const btn = document.querySelector('button[aria-label="Send message"], button[aria-label*="Send"], button[class*="submit"], button[class*="send"]');
-      if (btn) {
-        btn.click();
-        return true;
+      // Fallback to raw CDP Input.insertText if execCommand fails
+      if (!injectResult) {
+        console.warn('  [cdp] execCommand injection failed, falling back to raw CDP text insertion.');
+        await this.call('Input.insertText', { text });
       }
-      return false;
-    })()`);
+
+      // 3. Dispatch Enter key events to submit message
+      await new Promise((r) => setTimeout(r, 200));
+      await this.call('Input.dispatchKeyEvent', {
+        type: 'keyDown', key: 'Enter', code: 'Enter',
+        windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+      });
+      await this.call('Input.dispatchKeyEvent', {
+        type: 'keyUp', key: 'Enter', code: 'Enter',
+        windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+      });
+
+      // 4. Fallback Send Button click to guarantee trigger
+      await new Promise((r) => setTimeout(r, 150));
+      await this.evaluate(`(() => {
+        const btn = document.querySelector('button[aria-label="Send message"], button[aria-label*="Send"], button[class*="submit"], button[class*="send"]');
+        if (btn) {
+          btn.click();
+          return true;
+        }
+        return false;
+      })()`);
+    };
+
+    // Main reliable loop: Try, verify, retry if failed.
+    let success = false;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      console.log(`  [cdp] Message send attempt #${attempt}...`);
+      await attemptSend().catch(err => {
+        console.warn(`  [cdp] ⚠️ Attempt #${attempt} action error:`, err.message);
+      });
+
+      // Verify loop: poll DOM to see if message count increased
+      console.log('  [cdp] Verifying transmission status in DOM...');
+      for (let poll = 0; poll < 20; poll++) {
+        await new Promise((r) => setTimeout(r, 100));
+        const currentCount = await getInitialUserMsgCount();
+        if (currentCount > initialCount) {
+          success = true;
+          console.log(`  [cdp] ✅ Verification Success! Message count increased to ${currentCount}.`);
+          break;
+        }
+      }
+
+      if (success) break;
+      console.warn(`  [cdp] ⚠️ Attempt #${attempt} verification timed out (Message not visible in DOM).`);
+    }
+
+    if (!success) {
+      throw new Error('Command transmission verification failed after 2 attempts (Focus lost or React state lockup).');
+    }
 
     return true;
   }
